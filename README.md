@@ -25,7 +25,9 @@
 以上内容疑似由原作者通过LLM撰写，不具可行性，下方内容同理，除此安装教程外，其他内容仅供参考（图一乐）。请参考以下可行的安装步骤（小白版）：
 - 1.下载项目文件：`release`里的zip，下载后解压至comfyui便携包根目录下，例如`F:\ComfyUI便携整合包\comfyui-random-image-generation-available`
 - 2.安装所需要的节点和模型，至文档下方“ComfyUI 自定义节点”和“模型与文件放置”部分，依次下载，节点文件放在`\ComfyUI整合包\ComfyUI\custom_nodes`路径下，模型文件放在`\ComfyUI\models`相关文件夹下。节点直接打开链接下载，可用comfyui manager导入git链接一键下载，模型可Google或bing直接搜索模型名，前往HuggingFace或civitai上下载。完成后检查`\ComfyUI整合包\ComfyUI\custom_nodes`下的节点，确保各节点文件夹名和“ComfyUI 自定义节点”中所述一致，确保名字后没有`-main`之类的后缀
-- 3.执行项目根目录下`启动WebUI.bat`，初次运行会自动安装`aiohttp`，随后启动项目
+- 3.执行项目根目录下`启动WebUI.bat`，初次运行会自动安装`aiohttp`，随后启动项目。若初次运行无法正确展现前端WebUI界面，再度执行`启动WebUI.bat`即可
+- 以上安装步骤已经由我全流程验证，确保可行，有问题可提交issue反馈
+- <s>若在项目各处里发现各种奇怪/不知所云的md文档，原作者全锅</s>
 
 ## 主要功能
 
