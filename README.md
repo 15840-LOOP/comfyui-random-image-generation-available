@@ -22,13 +22,47 @@
 源码构建运行 `pwsh ./Build-Launcher.ps1`，输出位于 `dist/launcher/`；新版基于 **WinUI 3**，以自包含文件夹分发（`AnimaRandomStudio.exe` + 依赖 DLL，内置 .NET / Windows App Runtime / WebUI），无需为启动器单独安装运行时。详见 [启动器使用、构建与发布说明](launcher/README.md)。首次发布包仍需可信 Authenticode 签名。</s>
 
 
-以上内容疑似由原作者通过LLM撰写，不具可行性，下方内容同理，除此安装教程外，其他内容仅供参考（图一乐）。请参考以下可行的安装步骤（小白版）：
+以上内容疑似由原作者通过LLM撰写，不具可行性，本README其他部分同理，全是不知道哪个LLM瞎写的。除此安装指南和下方的疑难杂症解答板块外，其他内容仅供参考（介绍功能的到是可以看看）。请参考以下可行的安装步骤（小白版）：
+
 注意：请确保你使用的comfyui整合包里内置了Python。详细可打开comfyui整合包根目录，查看是否有名字为“python_embeded python python311 py311 python310 py310”其中之一的文件夹。如果Python文件夹名字不叫其中之一，改成其中之一
 - 1.下载项目文件：`release`里的zip，下载后解压至comfyui便携包根目录下，确保项目文件夹路径类似`\ComfyUI便携整合包\comfyui-random-image-generation-available`
 - 2.安装所需要的节点和模型，至文档下方“ComfyUI 自定义节点”和“模型与文件放置”部分，依次下载，节点文件放在`\ComfyUI整合包\ComfyUI\custom_nodes`路径下，模型文件放在`\ComfyUI整合包\ComfyUI\models`相关文件夹下。节点直接打开链接下载，可用comfyui manager导入git链接一键下载，模型可Google或bing直接搜索模型名，前往HuggingFace或civitai上下载。完成后检查`\ComfyUI整合包\ComfyUI\custom_nodes`下的节点，确保各节点文件夹名和“ComfyUI 自定义节点”中所述一致，确保名字后没有`-main`之类的后缀
 - 3.先启动并保持 ComfyUI 后台运行，再执行项目根目录下`启动WebUI.bat`，初次运行会自动安装`aiohttp`，随后启动项目。若初次运行无法正确展现前端WebUI界面，再度执行`启动WebUI.bat`即可
 - 以上安装步骤已经由我全流程验证，确保可行，有问题可提交issue反馈
 - <s>若在项目各处里发现各种奇怪/不知所云的md文档，原作者全锅</s>
+
+## 疑难杂症解答
+
+### Q: 启动黑框提示 `[WinError 10048]` 或 `Address already in use` 怎么办？
+
+**A: 原因是本地 8190 端口被占用了。** 常见原因是之前打开过本程序后强行关闭了窗口，导致后台残留了未退出的 Python 进程，或者手快双击多开了。
+
+**解决方法（任选一种）：**
+
+* **方法一：通过任务管理器结束（推荐，最直观）**
+  1. 按快捷键 `Ctrl + Shift + Esc` 打开 **任务管理器**。
+  2. 切换到 **“详细信息”** 标签页。
+  3. 找到名为 `python.exe` 的进程，右键选择 **“结束任务”**。
+  4. 重新双击 `启动WebUI.bat` 即可正常运行。
+
+* **方法二：通过命令行一键释放**
+  1. 按 `Win + R` 输入 `cmd` 回车，粘贴并执行以下命令查找占用者：
+     ```bat
+     netstat -ano | findstr :8190
+     ```
+  2. 查看最后一行最右侧的数字（PID，例如 12345），执行强制终止：
+     ```bat
+     taskkill /F /PID 12345
+     ```
+  3. 重新打开脚本即可。
+
+---
+
+### Q: 网页能打开，但点击生图提示无法连接或请求超时？
+
+**A: 原因是后台的 ComfyUI 未正常运行在 8188 端口。**
+1. 请确保你在运行本程序之前，已经启动了 ComfyUI。
+2. 在浏览器中打开 `http://127.0.0.1:8188`，确认 ComfyUI 原生界面能够正常加载后再重新尝试生图。
 
 ## 主要功能
 
