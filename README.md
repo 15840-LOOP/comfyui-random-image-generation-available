@@ -17,9 +17,15 @@
 
 ## Windows 安装启动器
 
-双击 `AnimaRandomStudio.exe`，按“选择 ComfyUI 目录 → 检查或安装环境 → 勾选缺失模型 → 启动工作台”完成首次配置。之后双击自动检查并启动服务，托盘提供打开工作台、启动/停止、检查资源、设置与日志。已有 `models/clip`、`models/unet` 和 `extra_model_paths.yaml` 中的资源会被识别，模型必须勾选才下载。
+<s>双击 `AnimaRandomStudio.exe`，按“选择 ComfyUI 目录 → 检查或安装环境 → 勾选缺失模型 → 启动工作台”完成首次配置。之后双击自动检查并启动服务，托盘提供打开工作台、启动/停止、检查资源、设置与日志。已有 `models/clip`、`models/unet` 和 `extra_model_paths.yaml` 中的资源会被识别，模型必须勾选才下载。
 
-源码构建运行 `pwsh ./Build-Launcher.ps1`，输出位于 `dist/launcher/`；新版基于 **WinUI 3**，以自包含文件夹分发（`AnimaRandomStudio.exe` + 依赖 DLL，内置 .NET / Windows App Runtime / WebUI），无需为启动器单独安装运行时。详见 [启动器使用、构建与发布说明](launcher/README.md)。首次发布包仍需可信 Authenticode 签名。
+源码构建运行 `pwsh ./Build-Launcher.ps1`，输出位于 `dist/launcher/`；新版基于 **WinUI 3**，以自包含文件夹分发（`AnimaRandomStudio.exe` + 依赖 DLL，内置 .NET / Windows App Runtime / WebUI），无需为启动器单独安装运行时。详见 [启动器使用、构建与发布说明](launcher/README.md)。首次发布包仍需可信 Authenticode 签名。</s>
+
+
+以上内容疑似由原作者通过LLM撰写，不具可行性，下方内容同理，除此安装教程外，其他内容仅供参考（图一乐）。请参考以下可行的安装步骤（小白版）：
+- 1.下载项目文件：`release`里的zip，下载后解压至comfyui便携包根目录下，例如`F:\ComfyUI便携整合包\comfyui-random-image-generation-available`
+- 2.安装所需要的节点和模型，至文档下方“ComfyUI 自定义节点”和“模型与文件放置”部分，依次下载，节点文件放在`\ComfyUI整合包\ComfyUI\custom_nodes`路径下，模型文件放在`\ComfyUI\models`相关文件夹下。节点直接打开链接下载，可用comfyui manager导入git链接一键下载，模型可Google或bing直接搜索模型名，前往HuggingFace或civitai上下载。完成后检查`\ComfyUI整合包\ComfyUI\custom_nodes`下的节点，确保各节点文件夹名和“ComfyUI 自定义节点”中所述一致，确保名字后没有`-main`之类的后缀
+- 3.执行项目根目录下`启动WebUI.bat`，初次运行会自动安装`aiohttp`，随后启动项目
 
 ## 主要功能
 
