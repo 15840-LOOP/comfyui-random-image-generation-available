@@ -15,7 +15,7 @@
 
 项目不打包任何模型、LoRA、检测器或第三方节点。Windows 用户可使用安装启动器导入已有 ComfyUI，或自动创建 NVIDIA 环境并按需下载模型。
 
-## Windows 安装启动器
+## 安装指南
 
 <s>双击 `AnimaRandomStudio.exe`，按“选择 ComfyUI 目录 → 检查或安装环境 → 勾选缺失模型 → 启动工作台”完成首次配置。之后双击自动检查并启动服务，托盘提供打开工作台、启动/停止、检查资源、设置与日志。已有 `models/clip`、`models/unet` 和 `extra_model_paths.yaml` 中的资源会被识别，模型必须勾选才下载。
 
