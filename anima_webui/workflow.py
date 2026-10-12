@@ -975,10 +975,10 @@ def render_workflows(
     composer_inputs.update(
         {
             "enable_artist": False,
-            "enable_character": settings["random_character"],
-            "enable_clothing": settings["random_clothing"],
-            "enable_background": settings["random_background"],
-            "enable_pose": settings["random_pose"],
+            "enable_character": False,   # 关闭合成器盲抽角色
+            "enable_clothing": False,    # 关闭合成器盲抽服装
+            "enable_background": False,  # 关闭合成器盲抽背景
+            "enable_pose": False,        # 关闭合成器盲抽姿势
             "character_detail": settings["character_detail"],
             "seed": prompt_seed,
             "artist_count": 0,
@@ -997,10 +997,34 @@ def render_workflows(
     injected_full_prompt = frozen_positive_prompt
     positive["quality_prompt"] = "" if injected_full_prompt else settings["quality_prompt"]
     positive["artist_tags"] = "" if injected_full_prompt else settings["manual_artist"]
-    positive["character_tags"] = "" if injected_full_prompt or settings["random_character"] else settings["fixed_character"]
-    positive["clothing_tags"] = "" if injected_full_prompt or settings["random_clothing"] else settings["fixed_clothing"]
-    positive["pose_tags"] = "" if injected_full_prompt or settings["random_pose"] else settings["fixed_pose"]
-    positive["background_tags"] = "" if injected_full_prompt or settings["random_background"] else settings["fixed_background"]
+
+    # 封装提取函数：精准取出 Python 抽卡池中各维度的真实命中词条
+    def get_resolved_tags(section_name: str) -> str:
+        if resolved_selection and resolved_selection.get(section_name):
+            return ", ".join(
+                item.get("prompt") or ", ".join(item.get("tags", []))
+                for item in resolved_selection[section_name]
+                if item
+            )
+        return ""
+
+    # 统一分流：开启随机池就用真实抽中的词，否则用固定提示词
+    positive["character_tags"] = (
+        "" if injected_full_prompt
+        else (get_resolved_tags("character") if settings["random_character"] else settings["fixed_character"])
+    )
+    positive["clothing_tags"] = (
+        "" if injected_full_prompt
+        else (get_resolved_tags("clothing") if settings["random_clothing"] else settings["fixed_clothing"])
+    )
+    positive["pose_tags"] = (
+        "" if injected_full_prompt
+        else (get_resolved_tags("pose") if settings["random_pose"] else settings["fixed_pose"])
+    )
+    positive["background_tags"] = (
+        "" if injected_full_prompt
+        else (get_resolved_tags("background") if settings["random_background"] else settings["fixed_background"])
+    )
     positive["extra_prompt"] = [str(COMPOSER_ID), 0]
     api[str(NEGATIVE_ID)]["inputs"]["text"] = frozen_negative_prompt or settings["negative_prompt"]
     api["23"]["inputs"]["value"] = settings["width"]
