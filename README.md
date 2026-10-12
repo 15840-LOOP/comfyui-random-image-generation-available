@@ -23,6 +23,7 @@
 
 
 以上内容疑似由原作者通过LLM撰写，不具可行性，下方内容同理，除此安装教程外，其他内容仅供参考（图一乐）。请参考以下可行的安装步骤（小白版）：
+注意：请确保你使用的comfyui整合包里内置了Python。详细可打开comfyui整合包根目录，查看是否有名字为“python_embeded python python311 py311 python310 py310”其中之一的文件夹。如果Python文件夹名字不叫其中之一，改成其中之一
 - 1.下载项目文件：`release`里的zip，下载后解压至comfyui便携包根目录下，确保项目文件夹路径类似`\ComfyUI便携整合包\comfyui-random-image-generation-available`
 - 2.安装所需要的节点和模型，至文档下方“ComfyUI 自定义节点”和“模型与文件放置”部分，依次下载，节点文件放在`\ComfyUI整合包\ComfyUI\custom_nodes`路径下，模型文件放在`\ComfyUI整合包\ComfyUI\models`相关文件夹下。节点直接打开链接下载，可用comfyui manager导入git链接一键下载，模型可Google或bing直接搜索模型名，前往HuggingFace或civitai上下载。完成后检查`\ComfyUI整合包\ComfyUI\custom_nodes`下的节点，确保各节点文件夹名和“ComfyUI 自定义节点”中所述一致，确保名字后没有`-main`之类的后缀
 - 3.先启动并保持 ComfyUI 后台运行，再执行项目根目录下`启动WebUI.bat`，初次运行会自动安装`aiohttp`，随后启动项目。若初次运行无法正确展现前端WebUI界面，再度执行`启动WebUI.bat`即可
