@@ -17,15 +17,15 @@
 
 ## 安装指南
 
-<s>双击 `AnimaRandomStudio.exe`，按“选择 ComfyUI 目录 → 检查或安装环境 → 勾选缺失模型 → 启动工作台”完成首次配置。之后双击自动检查并启动服务，托盘提供打开工作台、启动/停止、检查资源、设置与日志。已有 `models/clip`、`models/unet` 和 `extra_model_paths.yaml` 中的资源会被识别，模型必须勾选才下载。
+<s>双击 `AnimaRandomStudio.exe`，按“选择 ComfyUI 目录 → 检查或安装环境 → 勾选缺失模型 → 启动工作台”完成首次配置。之后双击自动检查并启动服务，托盘提供打开工作台、启动/停止、检查资源、设置与日志。已有 `models/clip`、`models/unet` 和 `extra_model_paths.yaml` 中的资源会被识别，模型必须勾选才下载。</s>
 
-源码构建运行 `pwsh ./Build-Launcher.ps1`，输出位于 `dist/launcher/`；新版基于 **WinUI 3**，以自包含文件夹分发（`AnimaRandomStudio.exe` + 依赖 DLL，内置 .NET / Windows App Runtime / WebUI），无需为启动器单独安装运行时。详见 [启动器使用、构建与发布说明](launcher/README.md)。首次发布包仍需可信 Authenticode 签名。</s>
+<s>源码构建运行 `pwsh ./Build-Launcher.ps1`，输出位于 `dist/launcher/`；新版基于 **WinUI 3**，以自包含文件夹分发（`AnimaRandomStudio.exe` + 依赖 DLL，内置 .NET / Windows App Runtime / WebUI），无需为启动器单独安装运行时。详见 [启动器使用、构建与发布说明](launcher/README.md)。首次发布包仍需可信 Authenticode 签名。</s>
 
 
 以上内容疑似由原作者通过LLM撰写，不具可行性，本README其他部分同理，全是不知道哪个LLM瞎写的。除此安装指南和下方的疑难杂症解答板块外，其他内容仅供参考（介绍功能的到是可以看看）。请参考以下可行的安装步骤（小白版）：
 
 注意：请确保你使用的comfyui整合包里内置了Python。详细可打开comfyui整合包根目录，查看是否有名字为“python_embeded python python311 py311 python310 py310”其中之一的文件夹。如果Python文件夹名字不叫其中之一，改成其中之一
-- 1.下载项目文件：`release`里的zip，下载后解压至comfyui便携包根目录下，确保项目文件夹路径类似`\ComfyUI便携整合包\comfyui-random-image-generation-available`
+- 1.下载项目文件：`release`里的zip，下载后解压至comfyui整合包根目录下，确保项目文件夹路径类似`\ComfyUI整合包\comfyui-random-image-generation-available`
 - 2.安装所需要的节点和模型，至文档下方“ComfyUI 自定义节点”和“模型与文件放置”部分，依次下载，节点文件放在`\ComfyUI整合包\ComfyUI\custom_nodes`路径下，模型文件放在`\ComfyUI整合包\ComfyUI\models`相关文件夹下。节点直接打开链接下载，可用comfyui manager导入git链接一键下载，模型可Google或bing直接搜索模型名，前往HuggingFace或civitai上下载。完成后检查`\ComfyUI整合包\ComfyUI\custom_nodes`下的节点，确保各节点文件夹名和“ComfyUI 自定义节点”中所述一致，确保名字后没有`-main`之类的后缀
 - 3.先启动并保持 ComfyUI 后台运行，再执行项目根目录下`启动WebUI.bat`，初次运行会自动安装`aiohttp`，随后启动项目。若初次运行无法正确展现前端WebUI界面，再度执行`启动WebUI.bat`即可
 - 以上安装步骤已经由我全流程验证，确保可行，有问题可提交issue反馈
