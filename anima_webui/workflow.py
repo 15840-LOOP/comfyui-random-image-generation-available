@@ -972,16 +972,17 @@ def render_workflows(
     frozen_positive_prompt = str(frozen_positive_prompt or "")
     frozen_negative_prompt = str(frozen_negative_prompt or "")
     composer_inputs = api[str(COMPOSER_ID)]["inputs"]
+    
     injected_full_prompt = frozen_positive_prompt
 
     composer_inputs = api[str(COMPOSER_ID)]["inputs"]
     composer_inputs.update(
         {
             "enable_artist": False,
-            "enable_character": False,   # 关闭合成器盲抽角色
-            "enable_clothing": False,    # 关闭合成器盲抽服装
-            "enable_background": False,  # 关闭合成器盲抽背景
-            "enable_pose": False,        # 关闭合成器盲抽姿势
+            "enable_character": False,
+            "enable_clothing": False,
+            "enable_background": False,
+            "enable_pose": False,
             "character_detail": settings["character_detail"],
             "seed": prompt_seed,
             "artist_count": 0,
@@ -991,9 +992,7 @@ def render_workflows(
             "clothing_count": settings["random_clothing_count"],
             "pose_count": settings["random_pose_count"],
             "background_count": settings["random_background_count"],
-            # 【修复额外提示词】：移除原逻辑中的 or resolved_prompt
-            # 只有在复现历史（冻结提示词）时才置空，正常抽卡时将 extra_prompt 忠实送入 Node 60
-            "extra_prompt": "" if injected_full_prompt else settings["extra_prompt"],
+            "extra_prompt": "",
         }
     )
 
@@ -1001,7 +1000,6 @@ def render_workflows(
     positive["quality_prompt"] = "" if injected_full_prompt else settings["quality_prompt"]
     positive["artist_tags"] = "" if injected_full_prompt else settings["manual_artist"]
 
-    # 封装提取函数：精准取出 Python 抽卡池中各维度的真实命中词条
     def get_resolved_tags(section_name: str) -> str:
         if resolved_selection and resolved_selection.get(section_name):
             return ", ".join(
@@ -1011,7 +1009,7 @@ def render_workflows(
             )
         return ""
 
-    # 1. 人数标签（1girl / 1boy 等）：保证底模能识别画面主体人物数
+    # 1. 人数
     people_parts = []
     if settings.get("female_count", 0) > 0:
         people_parts.append("1girl" if settings["female_count"] == 1 else f"{settings['female_count']}girls")
@@ -1019,16 +1017,17 @@ def render_workflows(
         people_parts.append("1boy" if settings["male_count"] == 1 else f"{settings['male_count']}boys")
     people_tags = ", ".join(people_parts)
 
-    # 2. 角色词条
+    # 2. 角色与表情融合
     char_tags = get_resolved_tags("character") if settings["random_character"] else settings["fixed_character"]
-
-    # 3. 【修复表情词条】：获取随机池抽中的表情，或用户填写的固定表情
     expr_tags = get_resolved_tags("expression") if settings["random_expression"] else settings["fixed_expression"]
-
-    # 4. 融合主体：人数 + 角色 + 表情（自动过滤空值并拼接）
     combined_character = ", ".join(part for part in [people_tags, char_tags, expr_tags] if part)
 
-    # 统一分流注入
+    # 3. 背景与额外提示词融合（彻底绕开 Node 60 吞词问题）
+    bg_tags = get_resolved_tags("background") if settings["random_background"] else settings["fixed_background"]
+    extra_tags = settings.get("extra_prompt", "").strip()
+    combined_background = ", ".join(part for part in [bg_tags, extra_tags] if part)
+
+    # 统一注入
     positive["character_tags"] = "" if injected_full_prompt else combined_character
     positive["clothing_tags"] = (
         "" if injected_full_prompt
@@ -1038,10 +1037,7 @@ def render_workflows(
         "" if injected_full_prompt
         else (get_resolved_tags("pose") if settings["random_pose"] else settings["fixed_pose"])
     )
-    positive["background_tags"] = (
-        "" if injected_full_prompt
-        else (get_resolved_tags("background") if settings["random_background"] else settings["fixed_background"])
-    )
+    positive["background_tags"] = "" if injected_full_prompt else combined_background
     positive["extra_prompt"] = [str(COMPOSER_ID), 0]
     api[str(NEGATIVE_ID)]["inputs"]["text"] = frozen_negative_prompt or settings["negative_prompt"]
     api["23"]["inputs"]["value"] = settings["width"]
