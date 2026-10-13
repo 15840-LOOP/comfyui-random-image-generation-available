@@ -972,6 +972,9 @@ def render_workflows(
     frozen_positive_prompt = str(frozen_positive_prompt or "")
     frozen_negative_prompt = str(frozen_negative_prompt or "")
     composer_inputs = api[str(COMPOSER_ID)]["inputs"]
+    injected_full_prompt = frozen_positive_prompt
+
+    composer_inputs = api[str(COMPOSER_ID)]["inputs"]
     composer_inputs.update(
         {
             "enable_artist": False,
@@ -988,13 +991,13 @@ def render_workflows(
             "clothing_count": settings["random_clothing_count"],
             "pose_count": settings["random_pose_count"],
             "background_count": settings["random_background_count"],
-            "extra_prompt": ""
-            if frozen_positive_prompt or resolved_prompt
-            else settings["extra_prompt"],
+            # 【修复额外提示词】：移除原逻辑中的 or resolved_prompt
+            # 只有在复现历史（冻结提示词）时才置空，正常抽卡时将 extra_prompt 忠实送入 Node 60
+            "extra_prompt": "" if injected_full_prompt else settings["extra_prompt"],
         }
     )
+
     positive = api[str(POSITIVE_ID)]["inputs"]
-    injected_full_prompt = frozen_positive_prompt
     positive["quality_prompt"] = "" if injected_full_prompt else settings["quality_prompt"]
     positive["artist_tags"] = "" if injected_full_prompt else settings["manual_artist"]
 
@@ -1008,11 +1011,25 @@ def render_workflows(
             )
         return ""
 
-    # 统一分流：开启随机池就用真实抽中的词，否则用固定提示词
-    positive["character_tags"] = (
-        "" if injected_full_prompt
-        else (get_resolved_tags("character") if settings["random_character"] else settings["fixed_character"])
-    )
+    # 1. 人数标签（1girl / 1boy 等）：保证底模能识别画面主体人物数
+    people_parts = []
+    if settings.get("female_count", 0) > 0:
+        people_parts.append("1girl" if settings["female_count"] == 1 else f"{settings['female_count']}girls")
+    if settings.get("male_count", 0) > 0:
+        people_parts.append("1boy" if settings["male_count"] == 1 else f"{settings['male_count']}boys")
+    people_tags = ", ".join(people_parts)
+
+    # 2. 角色词条
+    char_tags = get_resolved_tags("character") if settings["random_character"] else settings["fixed_character"]
+
+    # 3. 【修复表情词条】：获取随机池抽中的表情，或用户填写的固定表情
+    expr_tags = get_resolved_tags("expression") if settings["random_expression"] else settings["fixed_expression"]
+
+    # 4. 融合主体：人数 + 角色 + 表情（自动过滤空值并拼接）
+    combined_character = ", ".join(part for part in [people_tags, char_tags, expr_tags] if part)
+
+    # 统一分流注入
+    positive["character_tags"] = "" if injected_full_prompt else combined_character
     positive["clothing_tags"] = (
         "" if injected_full_prompt
         else (get_resolved_tags("clothing") if settings["random_clothing"] else settings["fixed_clothing"])
