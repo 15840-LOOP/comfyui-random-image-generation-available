@@ -971,10 +971,9 @@ def render_workflows(
     ]
     frozen_positive_prompt = str(frozen_positive_prompt or "")
     frozen_negative_prompt = str(frozen_negative_prompt or "")
-    composer_inputs = api[str(COMPOSER_ID)]["inputs"]
-    
     injected_full_prompt = frozen_positive_prompt
 
+    # Node 60 全部关闭且不传 resolved_prompt，彻底切断其输出
     composer_inputs = api[str(COMPOSER_ID)]["inputs"]
     composer_inputs.update(
         {
@@ -987,7 +986,7 @@ def render_workflows(
             "seed": prompt_seed,
             "artist_count": 0,
             "preview_collapsed": False,
-            "resolved_prompt": frozen_positive_prompt or resolved_prompt,
+            "resolved_prompt": "",
             "character_count": settings["random_character_count"],
             "clothing_count": settings["random_clothing_count"],
             "pose_count": settings["random_pose_count"],
@@ -1022,12 +1021,11 @@ def render_workflows(
     expr_tags = get_resolved_tags("expression") if settings["random_expression"] else settings["fixed_expression"]
     combined_character = ", ".join(part for part in [people_tags, char_tags, expr_tags] if part)
 
-    # 3. 背景与额外提示词融合（彻底绕开 Node 60 吞词问题）
+    # 3. 背景独立（不再混入 extra_prompt）
     bg_tags = get_resolved_tags("background") if settings["random_background"] else settings["fixed_background"]
-    extra_tags = settings.get("extra_prompt", "").strip()
-    combined_background = ", ".join(part for part in [bg_tags, extra_tags] if part)
 
-    # 统一注入
+    # 4. 统一注入 Node 42：断开 Node 60 连线，extra_prompt 直接接收字符串
+    extra_prompt_text = settings.get("extra_prompt", "").strip()
     positive["character_tags"] = "" if injected_full_prompt else combined_character
     positive["clothing_tags"] = (
         "" if injected_full_prompt
@@ -1037,8 +1035,9 @@ def render_workflows(
         "" if injected_full_prompt
         else (get_resolved_tags("pose") if settings["random_pose"] else settings["fixed_pose"])
     )
-    positive["background_tags"] = "" if injected_full_prompt else combined_background
-    positive["extra_prompt"] = [str(COMPOSER_ID), 0]
+    positive["background_tags"] = "" if injected_full_prompt else bg_tags
+    positive["extra_prompt"] = injected_full_prompt if injected_full_prompt else extra_prompt_text
+
     api[str(NEGATIVE_ID)]["inputs"]["text"] = frozen_negative_prompt or settings["negative_prompt"]
     api["23"]["inputs"]["value"] = settings["width"]
     api["31"]["inputs"]["value"] = settings["height"]
@@ -1079,27 +1078,27 @@ def render_workflows(
     api["12"]["inputs"]["images"] = current_image
     _set_ui_mode(ui, 52, False)
 
+    _disconnect_ui_input(ui, POSITIVE_ID, "extra_prompt")
+    _set_ui_mode(ui, COMPOSER_ID, False)
     _set_ui_widget(
         ui,
         COMPOSER_ID,
         [
             False,
-            settings["random_character"],
-            settings["random_clothing"],
-            settings["random_background"],
-            settings["random_pose"],
+            False,
+            False,
+            False,
+            False,
             settings["character_detail"],
             prompt_seed,
             0,
             False,
-            frozen_positive_prompt or resolved_prompt,
+            "",
             settings["random_character_count"],
             settings["random_clothing_count"],
             settings["random_pose_count"],
             settings["random_background_count"],
-            ""
-            if frozen_positive_prompt or resolved_prompt
-            else settings["extra_prompt"],
+            "",
         ],
     )
     _set_ui_widget(ui, POSITIVE_ID, positive["quality_prompt"], 0)
@@ -1108,7 +1107,7 @@ def render_workflows(
     _set_ui_widget(ui, POSITIVE_ID, positive["clothing_tags"], 3)
     _set_ui_widget(ui, POSITIVE_ID, positive["pose_tags"], 4)
     _set_ui_widget(ui, POSITIVE_ID, positive["background_tags"], 5)
-    _set_ui_widget(ui, POSITIVE_ID, settings["extra_prompt"], 7)
+    _set_ui_widget(ui, POSITIVE_ID, positive["extra_prompt"], 7)
     _set_ui_widget(ui, NEGATIVE_ID, api[str(NEGATIVE_ID)]["inputs"]["text"], 0)
     for node_id, value in ((23, settings["width"]), (31, settings["height"]), (35, 1), (39, settings["steps"]), (41, settings["cfg"]), (12, filename_prefix)):
         _set_ui_widget(ui, node_id, value, 0)

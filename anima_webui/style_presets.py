@@ -49,6 +49,25 @@ PRESET_SETTING_KEYS = (
     "scheduler",
     "cfg_zero_star",
     "second_sampler",
+    # 提示词池:开关、抽取数量、固定提示词与随机池勾选条目。
+    # 与 DEFAULT_SETTINGS 的 random_*/random_*_count/fixed_*/pools 保持一致,
+    # 否则 preset_settings() 的 unknown 校验会拒绝前端提交的池字段。
+    "random_character",
+    "random_clothing",
+    "random_pose",
+    "random_background",
+    "random_expression",
+    "random_character_count",
+    "random_clothing_count",
+    "random_pose_count",
+    "random_background_count",
+    "random_expression_count",
+    "fixed_character",
+    "fixed_clothing",
+    "fixed_pose",
+    "fixed_background",
+    "fixed_expression",
+    "pools",
 )
 MAX_PRESETS = 256
 

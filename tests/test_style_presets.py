@@ -73,6 +73,82 @@ class StylePresetTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(settings["second_sampler"], DEFAULT_SETTINGS["second_sampler"])
         self.assertEqual(settings["manual_artist"], "@anmi")
 
+    def test_prompt_pool_fields_are_part_of_the_snapshot(self):
+        # 回归:预设白名单必须包含提示词池字段,否则保存时被丢弃、应用时无法回填。
+        for key in (
+            "random_character",
+            "random_clothing",
+            "random_pose",
+            "random_background",
+            "random_expression",
+            "random_character_count",
+            "random_clothing_count",
+            "random_pose_count",
+            "random_background_count",
+            "random_expression_count",
+            "fixed_character",
+            "fixed_clothing",
+            "fixed_pose",
+            "fixed_background",
+            "fixed_expression",
+            "pools",
+        ):
+            self.assertIn(key, PRESET_SETTING_KEYS)
+
+    def test_prompt_pool_snapshot_round_trips_through_preset_settings(self):
+        pools = {
+            "character": {"mode": "include", "ids": ["char_a", "char_b"], "excluded_ids": ["char_c"]},
+            "clothing": {"mode": "all", "ids": [], "excluded_ids": ["cloth_x"]},
+            "pose": {"mode": "include", "ids": ["pose_a"], "excluded_ids": []},
+            "background": {"mode": "include", "ids": [], "excluded_ids": []},
+            "expression": {"mode": "include", "ids": ["expr_a"], "excluded_ids": []},
+        }
+        settings = preset_settings(
+            {
+                # 角色抽取数不能超过画面总人数(默认 1),否则触发 validate_settings 校验。
+                "random_character": True,
+                "random_character_count": 1,
+                "random_pose": True,
+                "fixed_clothing": "school uniform",
+                "pools": pools,
+            }
+        )
+        self.assertTrue(settings["random_character"])
+        self.assertEqual(settings["random_character_count"], 1)
+        self.assertTrue(settings["random_pose"])
+        self.assertEqual(settings["fixed_clothing"], "school uniform")
+        self.assertEqual(settings["pools"]["character"]["ids"], ["char_a", "char_b"])
+        self.assertEqual(settings["pools"]["character"]["excluded_ids"], ["char_c"])
+        self.assertEqual(settings["pools"]["clothing"]["mode"], "all")
+        self.assertEqual(settings["pools"]["expression"]["ids"], ["expr_a"])
+
+    async def test_prompt_pool_snapshot_persists_and_reloads(self):
+        pools = {
+            "character": {"mode": "include", "ids": ["char_a"], "excluded_ids": []},
+            "clothing": {"mode": "include", "ids": [], "excluded_ids": []},
+            "pose": {"mode": "all", "ids": [], "excluded_ids": ["pose_x"]},
+            "background": {"mode": "include", "ids": [], "excluded_ids": []},
+            "expression": {"mode": "include", "ids": [], "excluded_ids": []},
+        }
+        created = await self.store.create(
+            {
+                "name": "Pooled",
+                "favorite": False,
+                "settings": snapshot(random_pose=True, fixed_character="miku", pools=pools),
+            }
+        )
+        self.assertTrue(created["settings"]["random_pose"])
+        self.assertEqual(created["settings"]["fixed_character"], "miku")
+        self.assertEqual(created["settings"]["pools"]["pose"]["mode"], "all")
+        self.assertEqual(created["settings"]["pools"]["pose"]["excluded_ids"], ["pose_x"])
+
+        # 重新加载存储,确认池字段被持久化而非仅存在于内存。
+        reloaded = StylePresetStore(self.path)
+        item = next(entry for entry in reloaded.items if entry["id"] == created["id"])
+        self.assertEqual(item["settings"]["pools"]["character"]["ids"], ["char_a"])
+        self.assertEqual(item["settings"]["pools"]["pose"]["mode"], "all")
+        self.assertEqual(item["settings"]["fixed_character"], "miku")
+
     async def test_duplicate_names_are_rejected_case_insensitively(self):
         first = await self.store.create({"name": "Soft Light", "settings": snapshot(), "favorite": False})
         with self.assertRaisesRegex(WorkflowError, "同名"):
