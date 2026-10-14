@@ -1,6 +1,6 @@
 # 更新日志
 
-## 未发布
+## [v4.0.6]
 
 ### 新增
 
@@ -14,10 +14,6 @@
 - 同步更新 3 处过时单元测试，使其匹配「Node 60 旁路、Python 侧统一注入 Node 42」的新架构（`enable_clothing`/`enable_background` 期望值、`character_tags` 人数标签融合、UI `widgets_values` 结构）。
 - 修复坏数据文件被其他进程占用时启动崩溃的问题：`backup_corrupt_file` 的 `os.replace` 在 Windows 下可能因文件被编辑器/杀毒软件/同步盘独占而抛 `PermissionError`，该异常在 `reload()` 的 `except` 块内抛出、不被同块捕获，会冒泡导致 WebUI 无法启动，与「坏文件不阻断启动」的设计相悖。现仅在改名失败时降级为保留原文件并返回原路径，正常路径行为完全不变。
 - 新增 `tests/test_audit_bugs.py`：覆盖文件锁降级、空文件恢复与 `HistoryStore` 生命周期，作为上述边界行为的回归保护。
-
-## ？？？
-
-- 作者我操你妈
 
 ## [v4.0.5]
 
