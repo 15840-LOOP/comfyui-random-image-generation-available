@@ -14,7 +14,7 @@ from aiohttp.test_utils import TestClient, TestServer
 APP_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP_DIR))
 
-from anima_webui.server import COMFY_KEY, MANAGER_KEY, create_app  # noqa: E402
+from anima_webui.server import COMFY_KEY, HISTORY_KEY, MANAGER_KEY, create_app  # noqa: E402
 from anima_webui.workflow import DEFAULT_SETTINGS  # noqa: E402
 
 
@@ -911,6 +911,119 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         ).json()
         self.assertFalse(options["modes"]["replay"]["available"])
         self.assertTrue(options["resourceIssues"])
+
+    async def _open_folder_client(self, output_dir):
+        """构造一个显式绑定 output_dir 的独立 app,用于定位文件测试。"""
+        app = create_app(
+            app_dir=APP_DIR,
+            comfy=FakeComfy(),
+            history_path=Path(self.temp.name) / "open-folder-history.sqlite3",
+            custom_prompts_path=Path(self.temp.name) / "open-folder-custom-prompts.json",
+            style_presets_path=Path(self.temp.name) / "open-folder-style-presets.json",
+            anima_tools_dir=Path(self.temp.name) / "tools",
+            output_dir=output_dir,
+        )
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        return client
+
+    async def test_open_folder_reveals_existing_file(self):
+        output_dir = Path(self.temp.name) / "output"
+        output_dir.mkdir()
+        (output_dir / "test.png").write_bytes(b"png")
+        client = await self._open_folder_client(output_dir)
+        try:
+            response = await client.post("/api/batches", json={**DEFAULT_SETTINGS, "count": 1})
+            self.assertEqual(response.status, 201)
+            await client.server.app[MANAGER_KEY].wait()
+            history = await (await client.get("/api/history")).json()
+            image_id = history["items"][0]["id"]
+            with mock.patch(
+                "anima_webui.server._reveal_in_file_manager"
+            ) as reveal_mock:
+                opened = await client.post(f"/api/history/{image_id}/open-folder")
+            self.assertEqual(opened.status, 200)
+            self.assertEqual(await opened.json(), {"opened": True})
+            reveal_mock.assert_called_once()
+            self.assertEqual(reveal_mock.call_args.args[0], (output_dir / "test.png").resolve())
+        finally:
+            await client.close()
+
+    async def test_open_folder_missing_file_returns_404(self):
+        output_dir = Path(self.temp.name) / "output-missing"
+        output_dir.mkdir()
+        client = await self._open_folder_client(output_dir)
+        try:
+            response = await client.post("/api/batches", json={**DEFAULT_SETTINGS, "count": 1})
+            self.assertEqual(response.status, 201)
+            await client.server.app[MANAGER_KEY].wait()
+            history = await (await client.get("/api/history")).json()
+            image_id = history["items"][0]["id"]
+            with mock.patch("anima_webui.server._reveal_in_file_manager") as reveal_mock:
+                missing = await client.post(f"/api/history/{image_id}/open-folder")
+            self.assertEqual(missing.status, 404)
+            self.assertEqual((await missing.json())["error"], "文件在本地磁盘中不存在")
+            reveal_mock.assert_not_called()
+        finally:
+            await client.close()
+
+    async def test_open_folder_without_output_dir_returns_400(self):
+        # 未配置 output 目录时,定位接口返回 400 且不阻断其他功能。
+        # 屏蔽相对路径探测,避免测试机恰好存在 ../ComfyUI/output 导致误命中。
+        with mock.patch("anima_webui.server.resolve_output_dir", return_value=None):
+            client = await self._open_folder_client(None)
+            try:
+                response = await client.post(
+                    "/api/batches", json={**DEFAULT_SETTINGS, "count": 1}
+                )
+                self.assertEqual(response.status, 201)
+                await client.server.app[MANAGER_KEY].wait()
+                history = await (await client.get("/api/history")).json()
+                image_id = history["items"][0]["id"]
+                blocked = await client.post(f"/api/history/{image_id}/open-folder")
+                self.assertEqual(blocked.status, 400)
+                self.assertEqual(
+                    (await blocked.json())["error"], "未配置或未找到 ComfyUI 输出目录"
+                )
+                # 其他功能不受影响:图片仍可读取。
+                self.assertEqual((await client.get(f"/api/images/{image_id}")).status, 200)
+            finally:
+                await client.close()
+
+    async def test_open_folder_rejects_path_traversal(self):
+        output_dir = Path(self.temp.name) / "output-traversal"
+        output_dir.mkdir()
+        client = await self._open_folder_client(output_dir)
+        try:
+            response = await client.post("/api/batches", json={**DEFAULT_SETTINGS, "count": 1})
+            self.assertEqual(response.status, 201)
+            await client.server.app[MANAGER_KEY].wait()
+            history = await (await client.get("/api/history")).json()
+            image_id = history["items"][0]["id"]
+            # 直接篡改数据库里的 filename 为穿越路径,验证接口拒绝。
+            store = client.server.app[HISTORY_KEY]
+            store.connection.execute(
+                "UPDATE images SET filename = ? WHERE id = ?",
+                ("../../etc/passwd", image_id),
+            )
+            store.connection.commit()
+            with mock.patch("anima_webui.server._reveal_in_file_manager") as reveal_mock:
+                rejected = await client.post(f"/api/history/{image_id}/open-folder")
+            self.assertEqual(rejected.status, 400)
+            self.assertEqual((await rejected.json())["error"], "图片路径无效")
+            reveal_mock.assert_not_called()
+        finally:
+            await client.close()
+
+    async def test_config_exposes_output_dir(self):
+        output_dir = Path(self.temp.name) / "output-config"
+        output_dir.mkdir()
+        client = await self._open_folder_client(output_dir)
+        try:
+            payload = await (await client.get("/api/config")).json()
+            self.assertEqual(payload["output_dir"], str(output_dir.resolve()))
+        finally:
+            await client.close()
 
     async def test_launcher_shutdown_requires_token(self):
         # 未配置 token 时端点不存在;配置了也必须携带正确令牌。

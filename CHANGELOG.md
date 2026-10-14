@@ -1,5 +1,14 @@
 # 更新日志
 
+## 未发布
+
+### 新增
+
+- 历史详情新增「定位文件」按钮，可在系统文件管理器中高亮选中该图片；Windows 使用 `explorer /select`，macOS/Linux 退化为打开所在目录。
+- 新增 `POST /api/history/{image_id}/open-folder` 接口，路径经 `normalize_lora_path` 规范化与 `is_relative_to` 越界校验，文件缺失返回 404、未配置输出目录返回 400，均给出友好 JSON 提示。
+- 新增 `--output-dir` 命令行参数与 `COMFYUI_OUTPUT_DIR` 环境变量；未显式指定时按便携包结构自动探测项目同级的 `../output` 与 `../ComfyUI/output`。
+- `GET /api/config` 现返回 `output_dir` 字段。
+
 ## 0.4.0 - 2026-10-03
 
 ### 新增

@@ -6,6 +6,8 @@ import hmac
 import json
 import logging
 import os
+import subprocess
+import sys
 import threading
 import webbrowser
 from pathlib import Path
@@ -15,7 +17,7 @@ from urllib.parse import urlencode, urlsplit
 from aiohttp import web
 
 from .comfy import ComfyClient, ComfyError
-from .catalog import CatalogError, PromptCatalog, SECTIONS
+from .catalog import CatalogError, PromptCatalog, SECTIONS, resolve_output_dir
 from .custom_prompts import CustomPromptStore
 from .favorites import FavoritesService, favorite_key
 from .history import HistoryStore
@@ -23,7 +25,7 @@ from .lora_triggers import LoraTriggerOverrideStore
 from .prompt_rules import PromptRuleStore
 from .runner import BatchConflict, BatchManager
 from .style_presets import StylePresetStore
-from .workflow import DEFAULT_SETTINGS, WorkflowError, WorkflowTemplates
+from .workflow import DEFAULT_SETTINGS, WorkflowError, WorkflowTemplates, normalize_lora_path
 from .launcher import configure_resources
 
 
@@ -44,6 +46,7 @@ PROMPT_RULES_KEY: web.AppKey[Any] = web.AppKey("prompt_rules", object)
 ALLOWED_HOSTNAMES_KEY: web.AppKey[frozenset[str]] = web.AppKey(
     "allowed_hostnames", frozenset
 )
+OUTPUT_DIR_KEY: web.AppKey[Any] = web.AppKey("output_dir", object)
 
 LOCAL_HOSTNAMES = {"127.0.0.1", "localhost", "::1"}
 
@@ -112,6 +115,20 @@ def _query_bool(request: web.Request, name: str, default: bool = False) -> bool:
     raise WorkflowError(f"{name} 必须是布尔值")
 
 
+def _reveal_in_file_manager(path: Path) -> None:
+    """在系统文件管理器中定位并高亮选中该文件(阻塞调用,须经 to_thread 执行)。
+
+    Windows 使用 explorer /select 直接选中;其他平台退化为打开所在目录。
+    """
+    if sys.platform.startswith("win"):
+        explorer = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "explorer.exe")
+        subprocess.run([explorer, "/select,", str(path)], check=False)
+    elif sys.platform == "darwin":
+        subprocess.run(["open", "-R", str(path)], check=False)
+    else:
+        subprocess.run(["xdg-open", str(path.parent)], check=False)
+
+
 def create_app(
     *,
     app_dir: str | Path = APP_DIR,
@@ -126,10 +143,12 @@ def create_app(
     data_dir: str | Path | None = None,
     resource_paths: dict[str, str] | None = None,
     shutdown_token: str | None = None,
+    output_dir: str | Path | None = None,
 ) -> web.Application:
     root = Path(app_dir)
     storage = Path(data_dir) if data_dir is not None else root / "data"
     client = comfy or ComfyClient()
+    resolved_output_dir = resolve_output_dir(root, output_dir)
     history = HistoryStore(history_path or storage / "history.sqlite3")
     catalog = PromptCatalog(root, anima_tools_dir)
     custom_prompts = CustomPromptStore(
@@ -173,6 +192,7 @@ def create_app(
     app[STYLE_PRESETS_KEY] = style_presets
     app[LORA_TRIGGER_OVERRIDES_KEY] = lora_trigger_overrides
     app[PROMPT_RULES_KEY] = prompt_rules
+    app[OUTPUT_DIR_KEY] = resolved_output_dir
 
     async def favorite_keys(section: str, collection: str = "") -> set[str] | None:
         if not collection:
@@ -202,6 +222,7 @@ def create_app(
             {
                 "defaults": startup_defaults,
                 "comfy_url": getattr(client, "base_url", "local"),
+                "output_dir": str(resolved_output_dir or ""),
                 "catalog": {
                     "available": catalog.available,
                     "path": str(catalog.tools_dir or ""),
@@ -790,6 +811,37 @@ def create_app(
         body, content_type = await client.image_bytes(record)
         return web.Response(body=body, content_type=content_type.split(";", 1)[0])
 
+    async def open_folder(request: web.Request) -> web.Response:
+        record = await history.get_image(int(request.match_info["image_id"]))
+        output_dir = app[OUTPUT_DIR_KEY]
+        if output_dir is None:
+            return web.json_response(
+                {"error": "未配置或未找到 ComfyUI 输出目录"}, status=400
+            )
+        # 复用 LoRA 路径规范:拒绝绝对路径、盘符、.. 与空段,防止路径穿越。
+        try:
+            filename = normalize_lora_path(record.get("filename"))
+            subfolder = str(record.get("subfolder") or "").strip()
+            if subfolder:
+                subfolder = normalize_lora_path(subfolder)
+        except WorkflowError:
+            return web.json_response({"error": "图片路径无效"}, status=400)
+        target = Path(output_dir)
+        if subfolder:
+            target = target / subfolder
+        target = (target / filename).resolve()
+        # 二次确认解析结果仍位于 output 目录内(防符号链接/穿越越界)。
+        if not target.is_relative_to(Path(output_dir)):
+            return web.json_response({"error": "图片路径无效"}, status=400)
+        if not target.is_file():
+            return web.json_response({"error": "文件在本地磁盘中不存在"}, status=404)
+        try:
+            await asyncio.to_thread(_reveal_in_file_manager, target)
+        except OSError as error:
+            logger.warning("打开文件位置失败(%s): %s", target, error)
+            return web.json_response({"error": "无法打开文件资源管理器"}, status=500)
+        return web.json_response({"opened": True})
+
     async def index(_: web.Request) -> web.FileResponse:
         return web.FileResponse(root / "static" / "index.html")
 
@@ -874,6 +926,7 @@ def create_app(
         r"/api/history/{image_id:\d+}/regenerate", regenerate_history
     )
     app.router.add_delete(r"/api/history/{image_id:\d+}", delete_history)
+    app.router.add_post(r"/api/history/{image_id:\d+}/open-folder", open_folder)
     app.router.add_get(r"/api/images/{image_id:\d+}", image)
     app.router.add_get("/", index)
     app.router.add_get("/favicon.ico", favicon)
@@ -922,6 +975,11 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8190)
     parser.add_argument("--comfy-url", default="http://127.0.0.1:8188")
     parser.add_argument("--anima-tools-dir", default=None)
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="ComfyUI 输出目录；缺省时按 COMFYUI_OUTPUT_DIR 与便携包相对路径探测",
+    )
     parser.add_argument("--data-dir", default=None, help="用户数据目录；默认仍为项目 data")
     parser.add_argument("--resource-paths", default=None, help="启动器解析的模型相对路径映射 JSON")
     parser.add_argument(
@@ -943,6 +1001,7 @@ def main() -> None:
         data_dir=args.data_dir,
         resource_paths=json.loads(Path(args.resource_paths).read_text(encoding="utf-8")) if args.resource_paths else None,
         shutdown_token=args.shutdown_token,
+        output_dir=args.output_dir,
     )
     if not args.no_browser:
         threading.Timer(0.8, lambda: webbrowser.open(f"http://127.0.0.1:{args.port}")).start()

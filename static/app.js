@@ -104,6 +104,7 @@ const ui = Object.fromEntries(
     "detailPositive",
     "detailNegative",
     "restoreSettings",
+    "openFolder",
     "deleteRecord",
     "toast",
     "poolDrawer",
@@ -4213,6 +4214,18 @@ ui.restoreSettings.addEventListener("click", () => {
   ui.detailDialog.close();
   schedulePersist();
   toast("已载入历史设置");
+});
+ui.openFolder.addEventListener("click", async () => {
+  if (!selectedRecord || ui.openFolder.disabled) return;
+  ui.openFolder.disabled = true;
+  try {
+    await request(`/api/history/${selectedRecord.id}/open-folder`, { method: "POST" });
+    toast("已在文件资源管理器中定位该图片");
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    ui.openFolder.disabled = false;
+  }
 });
 ui.deleteRecord.addEventListener("click", async () => {
   if (!selectedRecord || !confirm("只删除 WebUI 历史记录，图片文件会保留。继续吗？")) return;

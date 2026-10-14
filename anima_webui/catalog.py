@@ -143,6 +143,36 @@ def discover_tools_dir(app_dir: str | Path, override: str | Path | None = None) 
     return None
 
 
+def resolve_output_dir(app_dir: str | Path, override: str | Path | None = None) -> Path | None:
+    """解析 ComfyUI 输出目录,供「定位文件」功能使用。
+
+    三级优先级(与 discover_tools_dir 同款探测思路):
+    1. 显式参数 override(--output-dir / create_app(output_dir=...));
+    2. 环境变量 COMFYUI_OUTPUT_DIR;
+    3. 便携包常见相对路径:项目同级的 ../output 与 ../ComfyUI/output。
+    均未命中时返回 None,不阻断启动;定位接口据此返回 400。
+    """
+    import os
+
+    candidates: list[Path] = []
+    if override:
+        candidates.append(Path(override))
+    if os.environ.get("COMFYUI_OUTPUT_DIR"):
+        candidates.append(Path(os.environ["COMFYUI_OUTPUT_DIR"]))
+    root = Path(app_dir)
+    # 只保留可移植的探测规则:显式参数、环境变量、项目同级的 output 目录。
+    # (Windows 文件系统大小写不敏感,同级规则同样覆盖 ComfyUI 等写法。)
+    candidates.append(root.parent / "output")
+    candidates.append(root.parent / "ComfyUI" / "output")
+    for candidate in candidates:
+        try:
+            if candidate.is_dir():
+                return candidate.resolve()
+        except OSError:
+            continue
+    return None
+
+
 def _character_key(item: dict[str, Any]) -> str:
     return f"character:{normalize_text(item.get('name'))}||{normalize_text(item.get('copyright'))}"
 
