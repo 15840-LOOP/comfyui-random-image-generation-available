@@ -973,7 +973,8 @@ def render_workflows(
     frozen_negative_prompt = str(frozen_negative_prompt or "")
     injected_full_prompt = frozen_positive_prompt
 
-    # Node 60 全部关闭且不传 resolved_prompt，彻底切断其输出
+    # Node 60 的 enable_* 全部关闭以旁路合成器盲抽(防止吞词)；
+    # resolved_prompt 仅作为可回溯元数据保留，供 extract_positive_prompt 兜底与历史还原。
     composer_inputs = api[str(COMPOSER_ID)]["inputs"]
     composer_inputs.update(
         {
@@ -986,7 +987,7 @@ def render_workflows(
             "seed": prompt_seed,
             "artist_count": 0,
             "preview_collapsed": False,
-            "resolved_prompt": "",
+            "resolved_prompt": frozen_positive_prompt or resolved_prompt,
             "character_count": settings["random_character_count"],
             "clothing_count": settings["random_clothing_count"],
             "pose_count": settings["random_pose_count"],
@@ -1093,7 +1094,7 @@ def render_workflows(
             prompt_seed,
             0,
             False,
-            "",
+            frozen_positive_prompt or resolved_prompt,
             settings["random_character_count"],
             settings["random_clothing_count"],
             settings["random_pose_count"],

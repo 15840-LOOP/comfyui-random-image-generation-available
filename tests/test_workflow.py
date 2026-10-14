@@ -97,24 +97,27 @@ class WorkflowTests(unittest.TestCase):
         }
         api, ui = render_workflows(self.api, self.ui, settings, 123456, 987, "AnimaRandom/test")
         composer = api["60"]["inputs"]
+        # 新架构:Node 60 合成器被彻底旁路(enable_* 全 False),
+        # 抽卡结果由 Python 侧统一注入 Node 42,避免合成器盲抽吞词。
         self.assertFalse(composer["enable_artist"])
         self.assertEqual(composer["artist_count"], 0)
         self.assertFalse(composer["enable_character"])
         self.assertEqual(composer["character_count"], 2)
-        self.assertTrue(composer["enable_clothing"])
+        self.assertFalse(composer["enable_clothing"])
         self.assertEqual(composer["clothing_count"], 3)
         self.assertFalse(composer["enable_pose"])
         self.assertEqual(composer["pose_count"], 1)
-        self.assertTrue(composer["enable_background"])
+        self.assertFalse(composer["enable_background"])
         self.assertEqual(composer["background_count"], 4)
-        self.assertEqual(composer["extra_prompt"], "rain")
+        self.assertEqual(composer["extra_prompt"], "")
         self.assertEqual(composer["seed"], 987)
         self.assertEqual(api["42"]["inputs"]["artist_tags"], "@anmi")
         self.assertEqual(api["5"]["inputs"]["sampler_name"], "euler")
         self.assertEqual(api["5"]["inputs"]["scheduler"], "karras")
         sampler_ui = next(node for node in ui["nodes"] if node["id"] == 5)
         self.assertEqual(sampler_ui["widgets_values"][4:6], ["euler", "karras"])
-        self.assertEqual(api["42"]["inputs"]["character_tags"], "fixed hero")
+        # 新架构:人数标签(1girl)与角色词条在 Python 侧融合后注入 Node 42。
+        self.assertEqual(api["42"]["inputs"]["character_tags"], "1girl, fixed hero")
         self.assertEqual(api["42"]["inputs"]["clothing_tags"], "")
         self.assertEqual(api["42"]["inputs"]["pose_tags"], "fixed pose")
         self.assertEqual(api["42"]["inputs"]["background_tags"], "")
@@ -131,7 +134,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(ui_nodes[60]["widgets_values"][6], 987)
         self.assertEqual(ui_nodes[42]["widgets_values"][7], "rain")
         self.assertEqual(ui_nodes[60]["widgets_values"][10:14], [2, 3, 1, 4])
-        self.assertEqual(ui_nodes[42]["widgets_values"][2:6], ["fixed hero", "", "fixed pose", ""])
+        self.assertEqual(ui_nodes[42]["widgets_values"][2:6], ["1girl, fixed hero", "", "fixed pose", ""])
         # 回归:标量控件节点的 widgets_values 必须保持列表结构,
         # 否则嵌入 PNG 的 UI 工作流拖回 ComfyUI 时无法还原(#P0-1)。
         for node_id, expected in ((23, 1024), (31, 768), (35, 1), (39, 22), (41, 3.5), (12, "AnimaRandom/test")):
