@@ -521,13 +521,80 @@ def create_app(
     async def list_style_presets(_: web.Request) -> web.Response:
         return web.json_response(style_presets.list())
 
+    async def _parse_preset_request(request: web.Request) -> tuple[dict[str, Any], bytes | None]:
+        """解析预设提交,返回 (payload, 缩略图字节)。
+
+        支持两种形态:
+        - multipart/form-data:表单字段 name/settings/favorite + 文件字段 thumbnail/file/image;
+        - application/json:JSON 体,可选 source_image_id 引用作品库图片作为缩略图。
+        """
+        if request.content_type.startswith("multipart/"):
+            # request.post() 一次性消费 body 并解析出文本字段与文件字段,
+            # 不可再调用 request.multipart()(body 已被读取)。
+            form = await request.post()
+            payload: dict[str, Any] = {}
+            raw_settings = form.get("settings")
+            if raw_settings is not None:
+                try:
+                    payload["settings"] = json.loads(str(raw_settings))
+                except json.JSONDecodeError as error:
+                    raise WorkflowError("settings 不是有效 JSON") from error
+            if form.get("name") is not None:
+                payload["name"] = str(form.get("name"))
+            if form.get("favorite") is not None:
+                payload["favorite"] = str(form.get("favorite")).lower() in {"1", "true", "yes"}
+            thumbnail_bytes: bytes | None = None
+            for field in ("thumbnail", "file", "image"):
+                upload = form.get(field)
+                # aiohttp 的 FileField 暴露 .file(BytesIO);文本字段是 str。
+                if upload is not None and hasattr(upload, "file"):
+                    handle = upload.file
+                    handle.seek(0)
+                    thumbnail_bytes = handle.read()
+                    break
+            return payload, thumbnail_bytes
+        payload = await _json_body(request)
+        thumbnail_bytes = await _resolve_source_thumbnail(payload.pop("source_image_id", None))
+        return payload, thumbnail_bytes
+
+    async def _resolve_source_thumbnail(source_image_id: Any) -> bytes | None:
+        """按作品库图片 ID 取原图字节作为缩略图;ID 非法或不存在时报错。"""
+        if source_image_id is None or isinstance(source_image_id, bool):
+            return None
+        try:
+            image_id = int(source_image_id)
+        except (TypeError, ValueError):
+            raise WorkflowError("source_image_id 必须是整数")
+        try:
+            record = await history.get_image(image_id)
+        except KeyError:
+            raise WorkflowError(f"作品库图片不存在: {image_id}")
+        body, _content_type = await client.image_bytes(record)
+        return body
+
     async def create_style_preset(request: web.Request) -> web.Response:
-        return web.json_response(await style_presets.create(await _json_body(request)), status=201)
+        payload, thumbnail_bytes = await _parse_preset_request(request)
+        item = await style_presets.create(payload)
+        if thumbnail_bytes:
+            await style_presets.save_thumbnail(item["id"], thumbnail_bytes)
+            item = {**item, "thumbnail_url": style_presets.thumbnail_url(item["id"])}
+        return web.json_response(item, status=201)
 
     async def update_style_preset(request: web.Request) -> web.Response:
-        return web.json_response(
-            await style_presets.update(request.match_info["preset_id"], await _json_body(request))
-        )
+        preset_id = request.match_info["preset_id"]
+        payload, thumbnail_bytes = await _parse_preset_request(request)
+        item = await style_presets.update(preset_id, payload)
+        if thumbnail_bytes:
+            await style_presets.save_thumbnail(preset_id, thumbnail_bytes)
+            item = {**item, "thumbnail_url": style_presets.thumbnail_url(preset_id)}
+        return web.json_response(item)
+
+    async def style_preset_thumbnail(request: web.Request) -> web.Response:
+        preset_id = request.match_info["preset_id"]
+        path = style_presets.thumbnail_path(preset_id)
+        if not path.is_file():
+            raise web.HTTPNotFound()
+        return web.FileResponse(path, headers={"Cache-Control": "no-cache"})
 
     async def delete_style_preset(request: web.Request) -> web.Response:
         if not await style_presets.delete(request.match_info["preset_id"]):
@@ -882,7 +949,9 @@ def create_app(
     app.router.add_get("/api/resources", resources)
     app.router.add_get("/api/style-presets", list_style_presets)
     app.router.add_post("/api/style-presets", create_style_preset)
+    app.router.add_get("/api/style-presets/{preset_id}/thumbnail", style_preset_thumbnail)
     app.router.add_put("/api/style-presets/{preset_id}", update_style_preset)
+    app.router.add_patch("/api/style-presets/{preset_id}", update_style_preset)
     app.router.add_delete("/api/style-presets/{preset_id}", delete_style_preset)
     app.router.add_get("/api/prompt-rules", list_prompt_rules)
     app.router.add_post("/api/prompt-rules", create_prompt_rule)

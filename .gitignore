@@ -1,0 +1,15 @@
+# Python 编译缓存（必须忽略）
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 测试缓存
+.pytest_cache/
+
+# 运行时生成数据与本地输出
+data/
+
+# Windows 本地快捷方式与系统缓存
+*.lnk
+Thumbs.db
+Desktop.ini

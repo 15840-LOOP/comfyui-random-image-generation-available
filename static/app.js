@@ -103,6 +103,8 @@ const ui = Object.fromEntries(
     "detailSelection",
     "detailPositive",
     "detailNegative",
+    "copyPositivePrompt",
+    "copyNegativePrompt",
     "restoreSettings",
     "openFolder",
     "deleteRecord",
@@ -282,11 +284,60 @@ const ui = Object.fromEntries(
     "artistFavoriteList",
     "artistFavoriteCount",
     "presetSummary",
-    "presetName",
-    "savePreset",
     "presetError",
-    "presetList",
     "presetEmpty",
+    "presetGrid",
+    "presetPrevPage",
+    "presetNextPage",
+    "presetPageLabel",
+    "btnCreatePreset",
+    "tabBtnGallery",
+    "tabBtnPresets",
+    "galleryCount",
+    "presetsCount",
+    "galleryViewContainer",
+    "presetsViewContainer",
+    "presetCreateDialog",
+    "presetCreateForm",
+    "presetCreateName",
+    "presetCreatePreview",
+    "presetCreatePlaceholder",
+    "presetCreateFile",
+    "presetCreateResetCover",
+    "presetCreatePickHistory",
+    "presetCreateCoverHint",
+    "presetCreateError",
+    "historyPickerDialog",
+    "closeHistoryPicker",
+    "cancelHistoryPicker",
+    "historyPickerGrid",
+    "historyPickerEmpty",
+    "historyPickerPrev",
+    "historyPickerNext",
+    "historyPickerPageLabel",
+    "confirmHistoryPicker",
+    "closePresetCreate",
+    "cancelPresetCreate",
+    "presetOverwriteDialog",
+    "presetOverwriteForm",
+    "presetOverwriteSummary",
+    "presetOverwriteThumb",
+    "presetOverwriteError",
+    "closePresetOverwrite",
+    "cancelPresetOverwrite",
+    "presetRenameDialog",
+    "presetRenameForm",
+    "presetRenameName",
+    "presetRenameError",
+    "closePresetRename",
+    "cancelPresetRename",
+    "presetDeleteDialog",
+    "presetDeleteForm",
+    "presetDeleteSummary",
+    "presetDeleteError",
+    "closePresetDelete",
+    "cancelPresetDelete",
+    "confirmPresetDelete",
     "model_name",
     "sampler_name",
     "scheduler",
@@ -383,6 +434,9 @@ let favoritesAvailable = false;
 let customGroups = [];
 let artistFavoritesData = { groups: [], items: [] };
 let stylePresets = [];
+// 预设库纯前端分页状态:每页展示 12 个预设。
+let presetPage = 1;
+const PRESET_PAGE_SIZE = 12;
 let resources = { models: [], upscale_models: [], samplers: [], schedulers: [] };
 let resourceError = "";
 let resourcesLoaded = false;
@@ -424,8 +478,11 @@ function defaultView() {
 let poolViews = Object.fromEntries(SECTIONS.map((section) => [section, defaultView()]));
 
 async function request(path, options = {}) {
+  // FormData 由浏览器自动设置 multipart 边界,不能强制 JSON Content-Type,
+  // 否则预设缩略图上传会被服务端按 JSON 解析而失败。
+  const isFormData = typeof FormData !== "undefined" && options.body instanceof FormData;
   const response = await fetch(path, {
-    headers: options.body ? { "Content-Type": "application/json" } : undefined,
+    headers: options.body && !isFormData ? { "Content-Type": "application/json" } : undefined,
     ...options,
   });
   let payload = null;
@@ -449,6 +506,49 @@ function toast(message) {
   ui.toast.classList.add("show");
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => ui.toast.classList.remove("show"), 3200);
+}
+
+async function copyPromptToClipboard(text, button, successMsg) {
+  if (!text) {
+    toast("内容为空，无需复制");
+    return;
+  }
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      // 兼容不支持 clipboard API 的后备机制
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      document.body.removeChild(textarea);
+    }
+
+    toast(successMsg);
+
+    // 图标动画状态切换
+    if (button) {
+      const iconCopy = button.querySelector(".icon-copy");
+      const iconCheck = button.querySelector(".icon-check");
+      button.classList.add("copied");
+      if (iconCopy && iconCheck) {
+        iconCopy.hidden = true;
+        iconCheck.hidden = false;
+        clearTimeout(button._timer);
+        button._timer = setTimeout(() => {
+          iconCopy.hidden = false;
+          iconCheck.hidden = true;
+          button.classList.remove("copied");
+        }, 1500);
+      }
+    }
+  } catch (err) {
+    toast(`复制失败: ${err.message}`);
+  }
 }
 
 function clone(value) {
@@ -609,6 +709,71 @@ function normalizeSettings(raw) {
   };
   merged.manual_artist = canonicalArtists(merged.manual_artist);
   return merged;
+}
+
+/**
+ * 健壮的双轨提示词提取函数 (兼容随机池抽卡与原生固定词)
+ * @param {Object} image 单张图片的详情对象 (包含 resolved_selection 和 settings)
+ * @param {string} section 卡池分类 ('character' | 'clothing' | 'pose' | 'background' | 'expression')
+ * @returns {string} 实际生效的提示词文本 (若未使用则返回空字符串)
+ */
+function getEffectivePromptForSection(image, section) {
+  if (!image) return "";
+
+  // 轨 A: 优先检查是否从随机词库池抽中了词条
+  const poolItems = (image.resolved_selection && image.resolved_selection[section]) || [];
+  if (Array.isArray(poolItems) && poolItems.length > 0) {
+    const extracted = poolItems
+      .map((item) => (item.prompt || "").trim().replace(/,+$/, ""))
+      .filter((p) => p.length > 0)
+      .join(", ");
+    if (extracted.length > 0) {
+      return extracted;
+    }
+  }
+
+  // 轨 B: 若随机池未抽卡，回退检查生图时原本是否填了固定提示词
+  const fixedKey = `fixed_${section}`;
+  if (image.settings && typeof image.settings[fixedKey] === "string") {
+    const rawFixed = image.settings[fixedKey].trim();
+    if (rawFixed.length > 0) {
+      return rawFixed;
+    }
+  }
+
+  // 轨 C: 两个来源都没有词，才确认该板块确实未生效
+  return "";
+}
+
+/**
+ * 载入历史图片设置:在 applySettings 基础上,对 5 大卡池执行双轨提示词回填。
+ * 随机池抽卡图片会把实际抽中的词条固化为固定提示词;纯固定词图片保留原词;
+ * 仅当两处来源皆为空时才关闭卡池。
+ * @param {Object} record 历史记录详情对象 (含 settings 与 resolved_selection)
+ */
+function applyRecordSettings(record) {
+  if (!record) return;
+  const settings = clone(record.settings || {});
+  // 先按常规流程还原模型、采样、人物、LoRA 等全部参数。
+  applySettings(settings);
+
+  // 再对 5 大卡池执行双轨提取,覆盖 applySettings 依据 random_*/fixed_* 的粗判结果。
+  for (const section of SECTIONS) {
+    const promptText = getEffectivePromptForSection(record, section);
+    if (promptText) {
+      // 1. 有效提示词填入固定提示词数据状态与输入框
+      draft.fixed[section] = promptText;
+      // 2. 抽取模式锁定为最右侧的【固定】
+      draft.modes[section] = "fixed";
+    } else {
+      // 3. 只有确实无任何有效词条时,才清空并关闭该卡池
+      draft.fixed[section] = "";
+      draft.modes[section] = "off";
+    }
+  }
+  // 依据修正后的 draft 重新渲染 5 大卡池 UI(激活对应模式高亮并回填输入框)。
+  renderDimensions();
+  updatePoolOverview();
 }
 
 function applySettings(raw) {
@@ -1310,6 +1475,7 @@ function renderHistoryPage(data) {
   ui.prevPage.disabled = historyPage <= 1;
   ui.nextPage.disabled = historyPage >= historyPages;
   ui.historyCount.textContent = `${data.total || 0} 张图片`;
+  ui.galleryCount.textContent = String(data.total || 0);
   updatePreviewNavigation();
 }
 
@@ -3597,6 +3763,12 @@ function updateRepairControls() {
 }
 
 const PRESET_SETTING_KEYS = [
+  // 人物构成与角色细节:必须与后端 PRESET_SETTING_KEYS 及 DEFAULT_SETTINGS 对齐,
+  // 否则 presetSnapshot() 会丢弃 female_count/male_count/character_detail,
+  // 导致保存预设或载入预设时人物构成与角色细节模式无法还原。
+  "female_count",
+  "male_count",
+  "character_detail",
   "model_name",
   "loras",
   "lora_managed_triggers",
@@ -3651,84 +3823,358 @@ function setPresetFeedback(message = "", type = "error") {
   ui.presetError.textContent = message;
   ui.presetError.hidden = !message;
   ui.presetError.dataset.type = type;
-  ui.presetName.setAttribute("aria-invalid", String(Boolean(message) && type === "error"));
 }
 function renderStylePresets() {
-  ui.presetSummary.textContent = `${stylePresets.length} 个预设`;
-  ui.presetEmpty.hidden = stylePresets.length > 0;
-  ui.presetList.replaceChildren(
-    ...stylePresets.map((item) => {
-      const row = document.createElement("div");
-      row.className = `preset-row${item.favorite ? " favorite" : ""}`;
-      const activeLoras = (item.settings?.loras || []).filter((lora) => lora.enabled).length;
-      const settings = item.settings || {};
-      const modelShort = String(settings.model_name || "未指定模型")
-        .replace(/\.(safetensors|ckpt|pt|gguf)$/i, "")
-        .split("_")
-        .pop();
-      const metaParts = [
-        modelShort,
-        `${settings.width || "?"}×${settings.height || "?"}`,
-        `${settings.steps || "?"} 步`,
-        settings.hires?.enabled ? "高清开启" : "无修复",
-      ];
-      if (activeLoras) metaParts.push(`${activeLoras} LoRA`);
-      row.innerHTML = `<button class="preset-apply" type="button" title="${escapeHtml(settings.model_name || "")}"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(metaParts.join(" · "))}</small></button><div class="preset-actions"><button type="button" data-preset-favorite title="${item.favorite ? "取消收藏" : "收藏"}" aria-label="${item.favorite ? "取消收藏" : "收藏"}">${item.favorite ? "★" : "☆"}</button><button type="button" data-preset-update title="用当前设置覆盖" aria-label="用当前设置覆盖">↻</button><button type="button" data-preset-rename title="重命名" aria-label="重命名">✎</button><button type="button" data-preset-delete title="删除" aria-label="删除">×</button></div>`;
-      row.querySelector(".preset-apply").addEventListener("click", () => {
-        applySettings({ ...readSettings(), ...item.settings });
-        schedulePersist();
-        toast(`已应用预设：${item.name}`);
-      });
-      row
-        .querySelector("[data-preset-favorite]")
-        .addEventListener("click", () => updateStylePreset(item, { favorite: !item.favorite }));
-      row.querySelector("[data-preset-update]").addEventListener("click", () => {
-        if (confirm(`用当前设置覆盖“${item.name}”？`)) updateStylePreset(item, { settings: presetSnapshot() });
-      });
-      row.querySelector("[data-preset-rename]").addEventListener("click", () => {
-        const name = prompt("新的预设名称", item.name);
-        if (name?.trim()) updateStylePreset(item, { name: name.trim() });
-      });
-      row.querySelector("[data-preset-delete]").addEventListener("click", () => deleteStylePreset(item));
-      return row;
+  const total = stylePresets.length;
+  const totalPages = Math.max(1, Math.ceil(total / PRESET_PAGE_SIZE));
+  // 防止删除等操作后当前页溢出。
+  if (presetPage > totalPages) presetPage = totalPages;
+  if (presetPage < 1) presetPage = 1;
+
+  ui.presetSummary.textContent = `${total} 个预设`;
+  ui.presetsCount.textContent = String(total);
+  ui.presetEmpty.hidden = total > 0;
+
+  // 更新分页栏显示与按钮可用状态。
+  if (ui.presetPageLabel) ui.presetPageLabel.textContent = `${presetPage} / ${totalPages}`;
+  if (ui.presetPrevPage) ui.presetPrevPage.disabled = presetPage <= 1;
+  if (ui.presetNextPage) ui.presetNextPage.disabled = presetPage >= totalPages;
+
+  // 取当前页切片数据。
+  const startIndex = (presetPage - 1) * PRESET_PAGE_SIZE;
+  const pageItems = stylePresets.slice(startIndex, startIndex + PRESET_PAGE_SIZE);
+
+  ui.presetGrid.replaceChildren(
+    ...pageItems.map((item) => {
+      const card = document.createElement("div");
+      card.className = "preset-card";
+      card.dataset.presetId = item.id;
+      const thumbUrl = item.thumbnail_url || `/api/style-presets/${encodeURIComponent(item.id)}/thumbnail`;
+      const thumbMarkup = item.thumbnail_url
+        ? `<img class="preset-thumb" src="${escapeHtml(thumbUrl)}" alt="${escapeHtml(item.name)}" loading="lazy">`
+        : `<span class="preset-thumb-placeholder" aria-hidden="true">★</span>`;
+      card.innerHTML = `
+        <div class="preset-thumb-wrapper">
+          ${thumbMarkup}
+          <div class="preset-hover-overlay">
+            <button class="action-btn btn-load" type="button" title="一键载入">⚡ 载入</button>
+            <button class="action-btn btn-overwrite" type="button" title="用当前设置覆盖">⟳ 覆盖</button>
+            <button class="action-btn btn-rename" type="button" title="重命名">✎ 改名</button>
+            <button class="action-btn btn-delete" type="button" title="删除">🗑 删除</button>
+          </div>
+        </div>
+        <div class="preset-info">
+          <span class="preset-name" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</span>
+          <span class="preset-favorite-icon" data-favorite="${item.favorite ? "true" : "false"}" title="${item.favorite ? "取消收藏" : "收藏"}">★</span>
+        </div>`;
+      card.querySelector(".btn-load").addEventListener("click", () => loadStylePreset(item));
+      card.querySelector(".btn-overwrite").addEventListener("click", () => openPresetOverwriteDialog(item));
+      card.querySelector(".btn-rename").addEventListener("click", () => openPresetRenameDialog(item));
+      card.querySelector(".btn-delete").addEventListener("click", () => openPresetDeleteDialog(item));
+      card.querySelector(".preset-favorite-icon").addEventListener("click", () =>
+        updateStylePreset(item, { favorite: !item.favorite }),
+      );
+      return card;
     }),
   );
 }
-async function createStylePreset() {
-  if (ui.savePreset.disabled) return;
-  const name = ui.presetName.value.trim();
-  if (!name) {
-    setPresetFeedback("请输入预设名称");
-    ui.presetName.focus();
+
+// ---------- 一键载入:全量恢复工作台状态 ----------
+function loadStylePreset(item) {
+  const settings = item.settings || {};
+  // 全量覆盖:以预设 settings 为基准,补齐运行期字段(count)后整体应用,
+  // 确保提示词池、LoRA、画师、主模型、分辨率、步数、CFG、采样器等全部精确还原。
+  applySettings({ ...clone(settings), count: Number(ui.count.value) || 1 });
+  schedulePersist();
+  toast(`已载入预设：【${item.name}】`);
+}
+
+// ---------- 覆盖更新:PUT + 可选同步缩略图 ----------
+let presetOverwriteTarget = null;
+function openPresetOverwriteDialog(item) {
+  presetOverwriteTarget = item;
+  ui.presetOverwriteSummary.textContent = `是否使用当前工作台设置覆盖预设【${item.name}】？`;
+  ui.presetOverwriteThumb.checked = false;
+  setPresetDialogError(ui.presetOverwriteError);
+  ui.presetOverwriteDialog.showModal();
+}
+async function submitPresetOverwrite() {
+  const item = presetOverwriteTarget;
+  if (!item) return;
+  const syncThumb = ui.presetOverwriteThumb.checked;
+  const latest = syncThumb ? latestHistoryRecord() : null;
+  if (syncThumb && !latest) {
+    setPresetDialogError(ui.presetOverwriteError, "作品库暂无图片，无法同步缩略图");
+    return;
+  }
+  try {
+    const body = { settings: presetSnapshot() };
+    if (latest) body.source_image_id = latest.id;
+    await request(`/api/style-presets/${encodeURIComponent(item.id)}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+    ui.presetOverwriteDialog.close();
+    presetOverwriteTarget = null;
+    await loadStylePresets();
+    toast(`已覆盖预设：【${item.name}】`);
+  } catch (error) {
+    setPresetDialogError(ui.presetOverwriteError, error.message);
+  }
+}
+
+// ---------- 更改预设名:PATCH + 前端校验 ----------
+let presetRenameTarget = null;
+function openPresetRenameDialog(item) {
+  presetRenameTarget = item;
+  ui.presetRenameName.value = item.name;
+  setPresetDialogError(ui.presetRenameError);
+  ui.presetRenameDialog.showModal();
+  ui.presetRenameName.focus();
+  ui.presetRenameName.select();
+}
+async function submitPresetRename() {
+  const item = presetRenameTarget;
+  if (!item) return;
+  const name = ui.presetRenameName.value.trim();
+  if (!name || name.length > 100) {
+    setPresetDialogError(ui.presetRenameError, "预设名称需要 1-100 个字符");
+    return;
+  }
+  const duplicated = stylePresets.some(
+    (other) => other.id !== item.id && other.name.trim().toLocaleLowerCase() === name.toLocaleLowerCase(),
+  );
+  if (duplicated) {
+    setPresetDialogError(ui.presetRenameError, "已有同名风格预设");
+    return;
+  }
+  if (name === item.name) {
+    ui.presetRenameDialog.close();
+    presetRenameTarget = null;
+    return;
+  }
+  try {
+    await request(`/api/style-presets/${encodeURIComponent(item.id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name }),
+    });
+    ui.presetRenameDialog.close();
+    presetRenameTarget = null;
+    await loadStylePresets();
+    toast(`已重命名预设：【${name}】`);
+  } catch (error) {
+    setPresetDialogError(ui.presetRenameError, error.message);
+  }
+}
+
+// ---------- 删除预设:二次确认 + 淡出移除 ----------
+let presetDeleteTarget = null;
+function openPresetDeleteDialog(item) {
+  presetDeleteTarget = item;
+  ui.presetDeleteSummary.textContent = `确定删除预设【${item.name}】吗？此操作无法撤销。`;
+  setPresetDialogError(ui.presetDeleteError);
+  ui.presetDeleteDialog.showModal();
+}
+async function submitPresetDelete() {
+  const item = presetDeleteTarget;
+  if (!item) return;
+  try {
+    await request(`/api/style-presets/${encodeURIComponent(item.id)}`, { method: "DELETE" });
+    ui.presetDeleteDialog.close();
+    presetDeleteTarget = null;
+    stylePresets = stylePresets.filter((preset) => preset.id !== item.id);
+    const card = ui.presetGrid.querySelector(`.preset-card[data-preset-id="${CSS.escape(item.id)}"]`);
+    if (card) {
+      card.classList.add("is-removing");
+      card.addEventListener("animationend", () => renderStylePresets(), { once: true });
+      // 兜底:动画事件缺失时仍保证卡片被移除。
+      setTimeout(() => renderStylePresets(), 400);
+    } else {
+      renderStylePresets();
+    }
+    toast(`已删除预设：【${item.name}】`);
+  } catch (error) {
+    setPresetDialogError(ui.presetDeleteError, error.message);
+  }
+}
+
+// ---------- 新建预设:模态框 + 封面选择 ----------
+let presetCreateCover = { blob: null, objectUrl: null, sourceId: null };
+function latestHistoryRecord() {
+  return Array.isArray(historyItems) && historyItems.length ? historyItems[0] : null;
+}
+function setPresetDialogError(element, message = "") {
+  element.textContent = message;
+  element.hidden = !message;
+}
+function resetPresetCreateCover() {
+  if (presetCreateCover.objectUrl) URL.revokeObjectURL(presetCreateCover.objectUrl);
+  presetCreateCover = { blob: null, objectUrl: null, sourceId: null };
+  const latest = latestHistoryRecord();
+  if (latest) {
+    presetCreateCover.sourceId = latest.id;
+    ui.presetCreatePreview.src = `/api/images/${latest.id}`;
+    ui.presetCreatePreview.hidden = false;
+    ui.presetCreatePlaceholder.hidden = true;
+    ui.presetCreateCoverHint.textContent = "默认使用作品库最新生成图作为封面。";
+  } else {
+    ui.presetCreatePreview.hidden = true;
+    ui.presetCreatePreview.removeAttribute("src");
+    ui.presetCreatePlaceholder.hidden = false;
+    ui.presetCreateCoverHint.textContent = "作品库暂无图片，可上传本地图片作为封面。";
+  }
+}
+function openPresetCreateDialog() {
+  ui.presetCreateName.value = "";
+  setPresetDialogError(ui.presetCreateError);
+  resetPresetCreateCover();
+  ui.presetCreateDialog.showModal();
+  ui.presetCreateName.focus();
+}
+function applyPresetCreateFile(file) {
+  if (!file) return;
+  if (!file.type.startsWith("image/")) {
+    setPresetDialogError(ui.presetCreateError, "请选择图片文件");
+    return;
+  }
+  if (presetCreateCover.objectUrl) URL.revokeObjectURL(presetCreateCover.objectUrl);
+  presetCreateCover.blob = file;
+  presetCreateCover.sourceId = null;
+  presetCreateCover.objectUrl = URL.createObjectURL(file);
+  ui.presetCreatePreview.src = presetCreateCover.objectUrl;
+  ui.presetCreatePreview.hidden = false;
+  ui.presetCreatePlaceholder.hidden = true;
+  ui.presetCreateCoverHint.textContent = `已选择本地图片：${file.name}`;
+  setPresetDialogError(ui.presetCreateError);
+}
+// ---------- 从作品库选择封面 ----------
+let pickerHistoryPage = 1;
+let pickerHistoryPages = 1;
+let selectedPickerRecord = null;
+let pickerHistoryRequest = 0;
+const HISTORY_PICKER_LIMIT = 18;
+
+function renderHistoryPickerItems(items) {
+  ui.historyPickerGrid.replaceChildren(
+    ...items.map((record) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "history-picker-item";
+      button.dataset.recordId = String(record.id);
+      button.setAttribute("aria-label", `选择作品 ${record.filename || record.id}`);
+      button.innerHTML = `<img loading="lazy" decoding="async" src="/api/images/${record.id}" alt="${escapeHtml(record.filename || "作品缩略图")}">`;
+      if (selectedPickerRecord && String(selectedPickerRecord.id) === String(record.id)) {
+        button.classList.add("selected");
+      }
+      button.addEventListener("click", () => selectHistoryPickerRecord(record, button));
+      button.addEventListener("dblclick", () => {
+        selectHistoryPickerRecord(record, button);
+        applyHistoryPickerSelection();
+      });
+      return button;
+    }),
+  );
+}
+
+function selectHistoryPickerRecord(record, button) {
+  selectedPickerRecord = record;
+  ui.historyPickerGrid.querySelectorAll(".history-picker-item.selected").forEach((item) => item.classList.remove("selected"));
+  button.classList.add("selected");
+  ui.confirmHistoryPicker.disabled = false;
+}
+
+function updateHistoryPickerPager() {
+  ui.historyPickerPageLabel.textContent = `${pickerHistoryPage} / ${pickerHistoryPages}`;
+  ui.historyPickerPrev.disabled = pickerHistoryPage <= 1;
+  ui.historyPickerNext.disabled = pickerHistoryPage >= pickerHistoryPages;
+}
+
+async function loadHistoryPicker(page = 1) {
+  const requestId = ++pickerHistoryRequest;
+  try {
+    const data = await request(`/api/history?page=${page}&limit=${HISTORY_PICKER_LIMIT}`);
+    if (requestId !== pickerHistoryRequest) return;
+    pickerHistoryPage = Number(data.page) || 1;
+    pickerHistoryPages = Number(data.pages) || 1;
+    const items = Array.isArray(data.items) ? data.items : [];
+    renderHistoryPickerItems(items);
+    ui.historyPickerEmpty.hidden = items.length > 0;
+    updateHistoryPickerPager();
+  } catch (error) {
+    if (requestId !== pickerHistoryRequest) return;
+    toast(error.message);
+  }
+}
+
+function openHistoryPicker() {
+  selectedPickerRecord = null;
+  ui.confirmHistoryPicker.disabled = true;
+  ui.historyPickerDialog.showModal();
+  loadHistoryPicker(1);
+}
+
+function applyHistoryPickerSelection() {
+  if (!selectedPickerRecord) return;
+  if (presetCreateCover.objectUrl) URL.revokeObjectURL(presetCreateCover.objectUrl);
+  presetCreateCover.blob = null;
+  presetCreateCover.objectUrl = null;
+  presetCreateCover.sourceId = selectedPickerRecord.id;
+  ui.presetCreatePreview.src = `/api/images/${selectedPickerRecord.id}`;
+  ui.presetCreatePreview.hidden = false;
+  ui.presetCreatePlaceholder.hidden = true;
+  ui.presetCreateCoverHint.textContent = `已选择作品库图片：#${selectedPickerRecord.sequence || ""} (${selectedPickerRecord.filename || ""})`;
+  ui.historyPickerDialog.close();
+}
+
+async function submitPresetCreate() {
+  const name = ui.presetCreateName.value.trim();
+  if (!name || name.length > 100) {
+    setPresetDialogError(ui.presetCreateError, "预设名称需要 1-100 个字符");
     return;
   }
   if (stylePresets.some((item) => item.name.trim().toLocaleLowerCase() === name.toLocaleLowerCase())) {
-    setPresetFeedback("已有同名预设，请改名或使用覆盖按钮");
-    ui.presetName.focus();
+    setPresetDialogError(ui.presetCreateError, "已有同名预设，请改名或使用覆盖按钮");
     return;
   }
-  const originalLabel = ui.savePreset.textContent;
-  ui.savePreset.disabled = true;
-  ui.savePreset.textContent = "保存中…";
-  setPresetFeedback("正在写入本地预设…", "pending");
+  const submitButton = ui.presetCreateForm.querySelector('button[type="submit"]');
+  submitButton.disabled = true;
   try {
-    const created = await request("/api/style-presets", {
-      method: "POST",
-      body: JSON.stringify({ name, favorite: false, settings: presetSnapshot() }),
-    });
-    const favoriteCount = stylePresets.findIndex((item) => !item.favorite);
-    stylePresets.splice(favoriteCount < 0 ? stylePresets.length : favoriteCount, 0, created);
-    ui.presetName.value = "";
+    let created;
+    if (presetCreateCover.blob) {
+      const form = new FormData();
+      form.append("name", name);
+      form.append("favorite", "false");
+      form.append("settings", JSON.stringify(presetSnapshot()));
+      form.append("thumbnail", presetCreateCover.blob, presetCreateCover.blob.name || "cover.png");
+      created = await request("/api/style-presets", { method: "POST", body: form });
+    } else {
+      const body = { name, favorite: false, settings: presetSnapshot() };
+      if (presetCreateCover.sourceId != null) body.source_image_id = presetCreateCover.sourceId;
+      created = await request("/api/style-presets", { method: "POST", body: JSON.stringify(body) });
+    }
+    ui.presetCreateDialog.close();
+    resetPresetCreateCover();
+    // 新增预设排在列表首位(收藏区之后)。
+    const firstRegular = stylePresets.findIndex((item) => !item.favorite);
+    stylePresets.splice(firstRegular < 0 ? stylePresets.length : firstRegular, 0, created);
+    // 回到第一页,确保用户能直接看到刚创建的预设。
+    presetPage = 1;
     renderStylePresets();
-    setPresetFeedback(`已保存“${created.name}”`, "success");
-    toast("风格预设已保存");
+    toast(`已新建预设：【${created.name}】`);
   } catch (error) {
-    setPresetFeedback(error.message);
-    toast(error.message);
+    setPresetDialogError(ui.presetCreateError, error.message);
   } finally {
-    ui.savePreset.disabled = false;
-    ui.savePreset.textContent = originalLabel;
+    submitButton.disabled = false;
   }
+}
+function switchMainTab(tab) {
+  const showPresets = tab === "presets";
+  ui.tabBtnGallery.classList.toggle("active", !showPresets);
+  ui.tabBtnPresets.classList.toggle("active", showPresets);
+  ui.tabBtnGallery.setAttribute("aria-selected", String(!showPresets));
+  ui.tabBtnPresets.setAttribute("aria-selected", String(showPresets));
+  ui.galleryViewContainer.hidden = showPresets;
+  ui.presetsViewContainer.hidden = !showPresets;
 }
 async function updateStylePreset(item, changes) {
   try {
@@ -3737,16 +4183,6 @@ async function updateStylePreset(item, changes) {
       body: JSON.stringify(changes),
     });
     await loadStylePresets();
-  } catch (error) {
-    toast(error.message);
-  }
-}
-async function deleteStylePreset(item) {
-  if (!confirm(`删除预设“${item.name}”？`)) return;
-  try {
-    await request(`/api/style-presets/${encodeURIComponent(item.id)}`, { method: "DELETE" });
-    await loadStylePresets();
-    toast("风格预设已删除");
   } catch (error) {
     toast(error.message);
   }
@@ -4106,6 +4542,12 @@ for (const input of [ui.variantCount, ui.variantDrawerCount])
   });
 ui.prevPage.addEventListener("click", () => loadHistory(historyPage - 1));
 ui.nextPage.addEventListener("click", () => loadHistory(historyPage + 1));
+ui.copyPositivePrompt?.addEventListener("click", () => {
+  copyPromptToClipboard(ui.detailPositive.value, ui.copyPositivePrompt, "完整提示词已复制到剪贴板");
+});
+ui.copyNegativePrompt?.addEventListener("click", () => {
+  copyPromptToClipboard(ui.detailNegative.value, ui.copyNegativePrompt, "负面提示词已复制到剪贴板");
+});
 ui.detailImage.addEventListener("click", openImagePreview);
 ui.detailImage.addEventListener("keydown", (event) => {
   if (event.key !== "Enter" && event.key !== " ") return;
@@ -4210,7 +4652,9 @@ ui.detailDialog.addEventListener("cancel", (event) => {
 ui.restoreSettings.addEventListener("click", () => {
   if (!selectedRecord) return;
   closeImagePreview({ immediate: true, restoreFocus: false });
-  applySettings(selectedRecord.settings);
+  // 使用双轨提取载入:随机池抽卡图片固化实际抽中词条,纯固定词图片保留原词,
+  // 避免仅凭 resolved_selection 为空就误判为“未使用”而关闭卡池。
+  applyRecordSettings(selectedRecord);
   ui.detailDialog.close();
   schedulePersist();
   toast("已载入历史设置");
@@ -4342,14 +4786,61 @@ ui.manageArtists.addEventListener("click", openArtistDialog);
 ui.saveCurrentArtists.addEventListener("click", saveCurrentArtistFavorites);
 ui.closeArtists.addEventListener("click", () => ui.artistDialog.close());
 ui.cancelArtists.addEventListener("click", () => ui.artistDialog.close());
-ui.savePreset.addEventListener("click", createStylePreset);
-ui.presetName.addEventListener("keydown", (event) => {
-  if (event.key === "Enter") {
-    event.preventDefault();
-    createStylePreset();
+ui.btnCreatePreset.addEventListener("click", openPresetCreateDialog);
+ui.presetPrevPage?.addEventListener("click", () => {
+  if (presetPage > 1) {
+    presetPage -= 1;
+    renderStylePresets();
   }
 });
-ui.presetName.addEventListener("input", () => setPresetFeedback());
+ui.presetNextPage?.addEventListener("click", () => {
+  const totalPages = Math.max(1, Math.ceil(stylePresets.length / PRESET_PAGE_SIZE));
+  if (presetPage < totalPages) {
+    presetPage += 1;
+    renderStylePresets();
+  }
+});
+ui.presetCreateForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  submitPresetCreate();
+});
+ui.presetCreateFile.addEventListener("change", () => {
+  applyPresetCreateFile(ui.presetCreateFile.files?.[0]);
+  ui.presetCreateFile.value = "";
+});
+ui.presetCreateResetCover.addEventListener("click", resetPresetCreateCover);
+ui.presetCreatePickHistory.addEventListener("click", openHistoryPicker);
+ui.closeHistoryPicker.addEventListener("click", () => ui.historyPickerDialog.close());
+ui.cancelHistoryPicker.addEventListener("click", () => ui.historyPickerDialog.close());
+ui.confirmHistoryPicker.addEventListener("click", applyHistoryPickerSelection);
+ui.historyPickerPrev.addEventListener("click", () => {
+  if (pickerHistoryPage > 1) loadHistoryPicker(pickerHistoryPage - 1);
+});
+ui.historyPickerNext.addEventListener("click", () => {
+  if (pickerHistoryPage < pickerHistoryPages) loadHistoryPicker(pickerHistoryPage + 1);
+});
+ui.closePresetCreate.addEventListener("click", () => ui.presetCreateDialog.close());
+ui.cancelPresetCreate.addEventListener("click", () => ui.presetCreateDialog.close());
+ui.presetOverwriteForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  submitPresetOverwrite();
+});
+ui.closePresetOverwrite.addEventListener("click", () => ui.presetOverwriteDialog.close());
+ui.cancelPresetOverwrite.addEventListener("click", () => ui.presetOverwriteDialog.close());
+ui.presetRenameForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  submitPresetRename();
+});
+ui.closePresetRename.addEventListener("click", () => ui.presetRenameDialog.close());
+ui.cancelPresetRename.addEventListener("click", () => ui.presetRenameDialog.close());
+ui.presetDeleteForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  submitPresetDelete();
+});
+ui.closePresetDelete.addEventListener("click", () => ui.presetDeleteDialog.close());
+ui.cancelPresetDelete.addEventListener("click", () => ui.presetDeleteDialog.close());
+ui.tabBtnGallery.addEventListener("click", () => switchMainTab("gallery"));
+ui.tabBtnPresets.addEventListener("click", () => switchMainTab("presets"));
 ui.manual_artist.addEventListener("input", () => {
   normalizeArtistField(false);
   schedulePersist();

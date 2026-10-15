@@ -14,7 +14,7 @@
       document.documentElement.dataset.theme = theme;
     })();
   </script>
-  <link rel="stylesheet" href="/static/styles.css?v=20261003-cfgzero-2ndsampler1">
+  <link rel="stylesheet" href="/static/styles.css?v=20261015-preset-phase5">
 </head>
 <body>
   <div class="ambient" aria-hidden="true"></div>
@@ -52,19 +52,6 @@
             <label class="stepper"><span>男性</span><input id="male_count" type="number" min="0" max="5" step="1"></label>
           </div>
         </section>
-
-        <details class="control-section advanced-section preset-section">
-          <summary><span>风格预设</span><span id="presetSummary" class="summary-value">0 个预设</span><i>+</i></summary>
-          <div class="details-content">
-            <div class="preset-create-row">
-              <input id="presetName" type="text" maxlength="100" placeholder="预设名称" aria-label="风格预设名称" aria-describedby="presetError">
-              <button id="savePreset" class="button primary compact" type="button">保存当前</button>
-            </div>
-            <div id="presetError" class="field-error" role="status" hidden></div>
-            <div id="presetList" class="preset-list"></div>
-            <div id="presetEmpty" class="inline-empty">还没有风格预设。</div>
-          </div>
-        </details>
 
         <section class="control-section">
           <div class="section-heading"><h2>提示词池</h2><span id="poolOverview">0 项已选</span></div>
@@ -157,12 +144,36 @@
     </aside>
 
     <section class="history-panel">
-      <div class="history-header">
-        <div><span class="kicker">GENERATED ARCHIVE</span><h1>作品库</h1><p id="historyCount">0 张图片</p></div>
-        <div class="pager"><button id="prevPage" class="icon-button" type="button" title="上一页" aria-label="上一页">‹</button><span id="pageLabel">1 / 1</span><button id="nextPage" class="icon-button" type="button" title="下一页" aria-label="下一页">›</button></div>
+      <div class="main-tabs-header" role="tablist" aria-label="主工作区视图">
+        <button id="tabBtnGallery" class="tab-btn active" type="button" role="tab" aria-selected="true" aria-controls="galleryViewContainer">作品库 <span class="badge" id="galleryCount">0</span></button>
+        <button id="tabBtnPresets" class="tab-btn" type="button" role="tab" aria-selected="false" aria-controls="presetsViewContainer">预设库 <span class="badge" id="presetsCount">0</span></button>
       </div>
-      <div id="gallery" class="gallery" aria-live="polite"></div>
-      <div id="emptyState" class="empty-state"><span class="empty-mark">A</span><strong>等待第一张作品</strong><small>完成生成后会出现在这里</small></div>
+
+      <div id="galleryViewContainer" class="view-container" role="tabpanel" aria-labelledby="tabBtnGallery">
+        <div class="history-header">
+          <div><span class="kicker">GENERATED ARCHIVE</span><h1>作品库</h1><p id="historyCount">0 张图片</p></div>
+          <div class="pager"><button id="prevPage" class="icon-button" type="button" title="上一页" aria-label="上一页">‹</button><span id="pageLabel">1 / 1</span><button id="nextPage" class="icon-button" type="button" title="下一页" aria-label="下一页">›</button></div>
+        </div>
+        <div id="gallery" class="gallery" aria-live="polite"></div>
+        <div id="emptyState" class="empty-state"><span class="empty-mark">A</span><strong>等待第一张作品</strong><small>完成生成后会出现在这里</small></div>
+      </div>
+
+      <div id="presetsViewContainer" class="view-container" role="tabpanel" aria-labelledby="tabBtnPresets" hidden>
+        <div class="presets-header">
+          <div><span class="kicker">STYLE PRESETS</span><h1>预设库</h1><p id="presetSummary">0 个预设</p></div>
+          <div class="presets-actions">
+            <div class="pager">
+              <button id="presetPrevPage" class="icon-button" type="button" title="上一页" aria-label="上一页">‹</button>
+              <span id="presetPageLabel">1 / 1</span>
+              <button id="presetNextPage" class="icon-button" type="button" title="下一页" aria-label="下一页">›</button>
+            </div>
+            <button id="btnCreatePreset" class="button primary" type="button"><span aria-hidden="true">+</span> 新建预设</button>
+          </div>
+        </div>
+        <div id="presetError" class="field-error" role="status" hidden></div>
+        <div id="presetGrid" class="preset-grid" aria-live="polite"></div>
+        <div id="presetEmpty" class="empty-state"><span class="empty-mark">★</span><strong>还没有风格预设</strong><small>点击“新建预设”保存当前设置</small></div>
+      </div>
     </section>
   </main>
 
@@ -378,6 +389,82 @@
     </form>
   </dialog>
 
+  <dialog id="presetCreateDialog" class="compact-dialog preset-create-dialog">
+    <form id="presetCreateForm" method="dialog">
+      <div class="dialog-heading"><div><span class="kicker">NEW STYLE PRESET</span><h2>新建预设</h2><p class="dialog-subtitle">将当前工作台的所有生图要素打包保存为预设，方便随后一键调用</p></div><button id="closePresetCreate" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button></div>
+      <label class="field"><span>预设名称</span><input id="presetCreateName" type="text" maxlength="100" placeholder="例如 夜景柔光人像" required></label>
+      <div class="preset-cover-field">
+        <span class="preset-cover-label">封面缩略图</span>
+        <div class="preset-cover-preview">
+          <img id="presetCreatePreview" class="preset-cover-image" alt="预设封面预览" hidden>
+          <span id="presetCreatePlaceholder" class="preset-cover-placeholder" aria-hidden="true">★</span>
+        </div>
+        <div class="preset-cover-actions">
+          <label class="button ghost compact file-button" for="presetCreateFile">更换本地图片</label>
+          <input id="presetCreateFile" class="file-input" type="file" accept="image/png,image/jpeg,image/webp">
+          <button id="presetCreateResetCover" class="button ghost compact" type="button">使用最新作品</button>
+          <button id="presetCreatePickHistory" class="button ghost compact" type="button">从作品库选择</button>
+        </div>
+        <p id="presetCreateCoverHint" class="field-hint">默认使用作品库最新生成图作为封面。</p>
+      </div>
+      <div id="presetCreateError" class="field-error" role="alert" hidden></div>
+      <div class="dialog-actions"><span></span><span></span><button id="cancelPresetCreate" class="button ghost" type="button">取消</button><button class="button primary" type="submit">确认保存</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="historyPickerDialog" class="compact-dialog history-picker-dialog">
+    <form method="dialog">
+      <div class="dialog-heading">
+        <div>
+          <span class="kicker">GALLERY SELECT</span>
+          <h2>从作品库选择封面</h2>
+        </div>
+        <button id="closeHistoryPicker" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button>
+      </div>
+      <div id="historyPickerGrid" class="history-picker-grid" aria-live="polite"></div>
+      <div id="historyPickerEmpty" class="inline-empty" hidden>作品库暂无可用图片</div>
+      <footer class="dialog-actions history-picker-footer">
+        <div class="pager">
+          <button id="historyPickerPrev" class="icon-button dark" type="button" title="上一页" aria-label="上一页">‹</button>
+          <span id="historyPickerPageLabel">1 / 1</span>
+          <button id="historyPickerNext" class="icon-button dark" type="button" title="下一页" aria-label="下一页">›</button>
+        </div>
+        <div class="picker-btn-group">
+          <button id="cancelHistoryPicker" class="button ghost" type="button">取消</button>
+          <button id="confirmHistoryPicker" class="button primary" type="button" disabled>确认选择</button>
+        </div>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="presetOverwriteDialog" class="compact-dialog">
+    <form id="presetOverwriteForm" method="dialog">
+      <div class="dialog-heading"><div><span class="kicker">OVERWRITE PRESET</span><h2>覆盖更新预设</h2></div><button id="closePresetOverwrite" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button></div>
+      <p id="presetOverwriteSummary" class="import-hint"></p>
+      <label class="switch-row preset-overwrite-toggle"><span><strong>同步更新缩略图</strong><small>使用作品库最新生成图替换当前封面</small></span><input id="presetOverwriteThumb" type="checkbox"></label>
+      <div id="presetOverwriteError" class="field-error" role="alert" hidden></div>
+      <div class="dialog-actions"><span></span><span></span><button id="cancelPresetOverwrite" class="button ghost" type="button">取消</button><button class="button primary" type="submit">确认覆盖</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="presetRenameDialog" class="compact-dialog">
+    <form id="presetRenameForm" method="dialog">
+      <div class="dialog-heading"><div><span class="kicker">RENAME PRESET</span><h2>更改预设名</h2></div><button id="closePresetRename" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button></div>
+      <label class="field"><span>预设名称</span><input id="presetRenameName" type="text" maxlength="100" required></label>
+      <div id="presetRenameError" class="field-error" role="alert" hidden></div>
+      <div class="dialog-actions"><span></span><span></span><button id="cancelPresetRename" class="button ghost" type="button">取消</button><button class="button primary" type="submit">保存名称</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="presetDeleteDialog" class="compact-dialog">
+    <form id="presetDeleteForm" method="dialog">
+      <div class="dialog-heading"><div><span class="kicker">DELETE PRESET</span><h2>删除预设</h2></div><button id="closePresetDelete" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button></div>
+      <p id="presetDeleteSummary" class="delete-group-summary"></p>
+      <div id="presetDeleteError" class="field-error" role="alert" hidden></div>
+      <div class="dialog-actions"><span></span><span></span><button id="cancelPresetDelete" class="button ghost" type="button">取消</button><button id="confirmPresetDelete" class="button danger" type="submit">删除</button></div>
+    </form>
+  </dialog>
+
   <dialog id="detailDialog" class="detail-dialog">
     <button id="closeDialog" class="dialog-close" type="button" title="关闭" aria-label="关闭">×</button>
     <div class="detail-layout">
@@ -387,8 +474,36 @@
         <h2>生成详情</h2>
         <dl id="detailStats"></dl>
         <section id="detailSelection" class="selection-summary"></section>
-        <label>完整提示词<textarea id="detailPositive" rows="8" readonly></textarea></label>
-        <label>负面提示词<textarea id="detailNegative" rows="5" readonly></textarea></label>
+        <div class="prompt-field-wrapper">
+          <div class="prompt-field-header">
+            <span>完整提示词</span>
+            <button id="copyPositivePrompt" class="copy-icon-btn" type="button" title="复制完整提示词" aria-label="复制完整提示词">
+              <svg class="icon-copy" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+              </svg>
+              <svg class="icon-check" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" hidden>
+                <polyline points="20 6 9 17 4 12"></polyline>
+              </svg>
+            </button>
+          </div>
+          <textarea id="detailPositive" rows="8" readonly></textarea>
+        </div>
+        <div class="prompt-field-wrapper">
+          <div class="prompt-field-header">
+            <span>负面提示词</span>
+            <button id="copyNegativePrompt" class="copy-icon-btn" type="button" title="复制负面词" aria-label="复制负面词">
+              <svg class="icon-copy" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+              </svg>
+              <svg class="icon-check" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" hidden>
+                <polyline points="20 6 9 17 4 12"></polyline>
+              </svg>
+            </button>
+          </div>
+          <textarea id="detailNegative" rows="5" readonly></textarea>
+        </div>
         <div class="dialog-actions reproduce-actions">
           <button id="reproduceImage" class="button" type="button" title="查看原种子重跑选项" aria-expanded="false" aria-controls="replayDrawer">复现此图</button>
           <div class="variant-group">
@@ -441,6 +556,6 @@
   </dialog>
 
   <div id="toast" role="status" aria-live="polite"></div>
-  <script src="/static/app.js?v=20261003-cfgzero-2ndsampler1" defer></script>
+  <script src="/static/app.js?v=20261015-preset-phase5" defer></script>
 </body>
 </html>

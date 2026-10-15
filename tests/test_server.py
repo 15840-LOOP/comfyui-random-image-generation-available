@@ -8,6 +8,7 @@ from unittest import mock
 from pathlib import Path
 import sys
 
+import aiohttp
 from aiohttp.test_utils import TestClient, TestServer
 
 
@@ -159,6 +160,19 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             response.headers["Cache-Control"], "no-cache, max-age=0, must-revalidate"
         )
+        # 回归:预设库标签页控件必须随 HTML 一起下发,且 id 采用驼峰式,
+        # 与 app.js 的 ui 映射键名严格一致,防止再次出现
+        # 「缺少控件:btnCreatePreset/tabBtnGallery/...」的启动报错。
+        for control_id in (
+            "btnCreatePreset",
+            "tabBtnGallery",
+            "tabBtnPresets",
+            "galleryCount",
+            "presetsCount",
+            "galleryViewContainer",
+            "presetsViewContainer",
+        ):
+            self.assertIn(f'id="{control_id}"', index_html)
         static_response = await self.client.get("/static/app.js")
         app_js = await static_response.text()
         self.assertIn('"hires_percent"', app_js)
@@ -347,6 +361,97 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         deleted = await self.client.delete(f"/api/style-presets/{item['id']}")
         self.assertEqual(deleted.status, 200)
         self.assertEqual((await (await self.client.get("/api/style-presets")).json())["count"], 0)
+
+    async def test_style_preset_thumbnail_upload_and_serving(self):
+        snapshot = {
+            key: copy.deepcopy(DEFAULT_SETTINGS[key])
+            for key in ("model_name", "loras", "lora_managed_triggers", "hires", "detailers", "manual_artist", "quality_prompt", "extra_prompt", "negative_prompt", "width", "height", "steps", "cfg", "sampler_name", "scheduler")
+        }
+        created = await self.client.post(
+            "/api/style-presets",
+            json={"name": "Thumbed", "favorite": False, "settings": snapshot},
+        )
+        self.assertEqual(created.status, 201)
+        item = await created.json()
+        self.assertIsNone(item["thumbnail_url"])
+
+        # 未上传缩略图时,资源路由应返回 404。
+        missing = await self.client.get(f"/api/style-presets/{item['id']}/thumbnail")
+        self.assertEqual(missing.status, 404)
+
+        # 通过 multipart 上传缩略图。
+        form = aiohttp.FormData()
+        form.add_field("thumbnail", b"\x89PNG\r\n\x1a\nbytes", filename="cover.png", content_type="image/png")
+        uploaded = await self.client.put(
+            f"/api/style-presets/{item['id']}", data=form
+        )
+        self.assertEqual(uploaded.status, 200)
+        updated = await uploaded.json()
+        self.assertEqual(
+            updated["thumbnail_url"], f"/api/style-presets/{item['id']}/thumbnail"
+        )
+
+        served = await self.client.get(f"/api/style-presets/{item['id']}/thumbnail")
+        self.assertEqual(served.status, 200)
+        self.assertEqual(await served.read(), b"\x89PNG\r\n\x1a\nbytes")
+
+        # 列表接口应携带 thumbnail_url。
+        listing = await (await self.client.get("/api/style-presets")).json()
+        self.assertEqual(
+            listing["items"][0]["thumbnail_url"],
+            f"/api/style-presets/{item['id']}/thumbnail",
+        )
+
+        # 删除预设应同时移除缩略图文件。
+        await self.client.delete(f"/api/style-presets/{item['id']}")
+        gone = await self.client.get(f"/api/style-presets/{item['id']}/thumbnail")
+        self.assertEqual(gone.status, 404)
+
+    async def test_style_preset_thumbnail_from_source_image_id(self):
+        snapshot = {
+            key: copy.deepcopy(DEFAULT_SETTINGS[key])
+            for key in ("model_name", "loras", "lora_managed_triggers", "hires", "detailers", "manual_artist", "quality_prompt", "extra_prompt", "negative_prompt", "width", "height", "steps", "cfg", "sampler_name", "scheduler")
+        }
+        # 先跑一个批次,让历史库里有可引用的图片。
+        started = await self.client.post(
+            "/api/batches", json={**snapshot, "count": 1}
+        )
+        self.assertEqual(started.status, 201)
+        history = await (await self.client.get("/api/history")).json()
+        image_id = history["items"][0]["id"]
+
+        created = await self.client.post(
+            "/api/style-presets",
+            json={
+                "name": "FromHistory",
+                "favorite": False,
+                "settings": snapshot,
+                "source_image_id": image_id,
+            },
+        )
+        self.assertEqual(created.status, 201)
+        item = await created.json()
+        self.assertEqual(
+            item["thumbnail_url"], f"/api/style-presets/{item['id']}/thumbnail"
+        )
+        served = await self.client.get(f"/api/style-presets/{item['id']}/thumbnail")
+        self.assertEqual(served.status, 200)
+
+    async def test_style_preset_thumbnail_rejects_unknown_source_image(self):
+        snapshot = {
+            key: copy.deepcopy(DEFAULT_SETTINGS[key])
+            for key in ("model_name", "loras", "lora_managed_triggers", "hires", "detailers", "manual_artist", "quality_prompt", "extra_prompt", "negative_prompt", "width", "height", "steps", "cfg", "sampler_name", "scheduler")
+        }
+        response = await self.client.post(
+            "/api/style-presets",
+            json={
+                "name": "BadSource",
+                "favorite": False,
+                "settings": snapshot,
+                "source_image_id": 999999,
+            },
+        )
+        self.assertEqual(response.status, 400)
 
     async def test_favorite_crud_preserves_other_sections(self):
         pool = await (await self.client.get("/api/pools/pose?page=1&limit=1")).json()

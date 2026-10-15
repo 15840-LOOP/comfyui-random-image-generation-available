@@ -4,16 +4,55 @@
 
 ### 新增
 
+- **风格预设缩略图**：预设实体新增 `thumbnail_url` 字段，由物理文件推导（存在 `data/preset_thumbnails/{preset_id}.png` 时返回 `/api/style-presets/{preset_id}/thumbnail`，否则为 `null`），不写入 JSON，避免持久化状态与磁盘不一致。
+- `StylePresetStore` 新增 `thumbnail_dir`（与预设 JSON 同级的 `preset_thumbnails/`，构造时自动创建）、`save_thumbnail(preset_id, image_bytes)`（临时文件 + 原子替换写入，并同步刷新内存记录的 `thumbnail_url`）与 `thumbnail_path(preset_id)` 辅助方法。
+- 新增 `GET /api/style-presets/{preset_id}/thumbnail` 路由，返回 `FileResponse`（`image/png`）；文件缺失返回 404。
+- `POST /api/style-presets` 与 `PUT/PATCH /api/style-presets/{preset_id}` 现支持两种提交形态：JSON 体可携带可选 `source_image_id`（引用作品库图片，经 `HistoryStore.get_image` 取原图字节作为封面）；`multipart/form-data` 可直接上传 `thumbnail`/`file`/`image` 文件字段。`PUT` 同时新增 `PATCH` 别名。
+- 删除预设时联动物理删除对应缩略图文件，避免孤儿文件堆积。
 - 新增 `POST /api/history/{image_id}/open-folder` 接口，路径经 `normalize_lora_path` 规范化与 `is_relative_to` 越界校验，文件缺失返回 404、未配置输出目录返回 400，均给出友好 JSON 提示。
 - 新增 `--output-dir` 命令行参数与 `COMFYUI_OUTPUT_DIR` 环境变量；未显式指定时按便携包结构自动探测项目同级的 `../output` 与 `../ComfyUI/output`。
 - `GET /api/config` 现返回 `output_dir` 字段。
 
 ### 修复
 
+- 修复作品详情页「载入设置」误杀固定提示词的问题：此前载入逻辑仅依据 `resolved_selection[section]` 判定卡池是否使用，而纯固定词生图时该字段为空数组，导致 5 大卡池被错误关闭、手打固定词丢失。现改为**双轨优先级提取**（`getEffectivePromptForSection`）：优先取随机池抽中词条（`resolved_selection[section]` 非空数组，按 `, ` 拼接），其次回退取原图固定词（`settings["fixed_" + section]` 非空字符串），仅当两处皆空时才判定为「未使用」并关闭卡池。新增 `applyRecordSettings(record)` 专用载入函数，在 `applySettings` 还原模型/采样/人物/LoRA 等全部参数后，对 5 大卡池执行双轨回填：随机池抽卡图片自动跳到最右侧【固定】并固化实际抽中词条（ACTUAL DRAW），纯固定词图片保留原词并保持【固定】高亮，确实未使用的板块才清空并切换【关闭】。`ui.restoreSettings` 点击处理改用该函数并传入完整 `selectedRecord`（含 `resolved_selection`）。
+- 修复风格预设（`StylePresetStore`）字段白名单遗漏导致人物构成与角色细节无法保存/还原的问题：后端 `PRESET_SETTING_KEYS` 与前端 `static/app.js` 的 `PRESET_SETTING_KEYS` 同步补齐 `female_count`、`male_count`、`character_detail` 三个字段，与 `DEFAULT_SETTINGS` 对齐。此前保存或载入预设时「几女几男」与角色细节模式会被 `presetSnapshot()` 丢弃，或在前端提交全量 `settings` 时触发 `WorkflowError("风格预设包含未知参数")`。
+- `preset_settings()` 在校验未知参数前安全剔除运行期批次字段 `count`，避免前端直接提交完整工作台 state 时因 `count` 抛异常。
+- 新增 `tests/test_style_presets.py` 回归用例：覆盖人物构成/角色细节字段的保存与更新、旧版预设文件缺失新字段时经 `DEFAULT_SETTINGS` 自动补齐（不触发 `.corrupt.bak` 备份）、以及 `count` 运行期字段被忽略。
 - 修复 Node 60 合成器旁路后 `resolved_prompt` 被一并置空的问题：该字段仅作可回溯元数据，不参与抽卡，现恢复为 `frozen_positive_prompt or resolved_prompt`（API 与 UI 两处同步）。此前当历史条目缺少 `extra_pnginfo` 时，`extract_positive_prompt` 的兜底路径会读到空串，导致正向提示词丢失。`enable_*` 仍保持全 `False`、Node 42 仍为直接字符串注入。
 - 同步更新 3 处过时单元测试，使其匹配「Node 60 旁路、Python 侧统一注入 Node 42」的新架构（`enable_clothing`/`enable_background` 期望值、`character_tags` 人数标签融合、UI `widgets_values` 结构）。
 - 修复坏数据文件被其他进程占用时启动崩溃的问题：`backup_corrupt_file` 的 `os.replace` 在 Windows 下可能因文件被编辑器/杀毒软件/同步盘独占而抛 `PermissionError`，该异常在 `reload()` 的 `except` 块内抛出、不被同块捕获，会冒泡导致 WebUI 无法启动，与「坏文件不阻断启动」的设计相悖。现仅在改名失败时降级为保留原文件并返回原路径，正常路径行为完全不变。
 - 新增 `tests/test_audit_bugs.py`：覆盖文件锁降级、空文件恢复与 `HistoryStore` 生命周期，作为上述边界行为的回归保护。
+- 新增缩略图回归用例：`tests/test_style_presets.py` 覆盖缩略图目录创建、`thumbnail_url` 推导、`save_thumbnail` 原子写入无残留临时文件、删除预设联动清理缩略图；`tests/test_server.py` 覆盖 multipart 上传与静态路由、`source_image_id` 引用作品库图片、以及非法 `source_image_id` 返回 400。
+
+## 未发布V2
+
+### 变更 (Changed)
+
+- **左侧边栏瘦身**：移除左侧「生成设置」中原有的「风格预设」折叠区（`.preset-section`，含预设名称输入框、保存当前按钮与旧预设列表），使「人物构成」直连「提示词池」，释放侧边栏垂直高度。
+- **右侧主工作区顶层 Tab 化**：作品库顶部标题结构替换为平行标签页容器 `.main-tabs-header`，含「作品库」（`#tab-btn-gallery` + `#gallery-count` 徽章）与「预设库」（`#tab-btn-presets` + `#presets-count` 徽章）两组切换按钮；主显示区拆分为同级容器 `#gallery-view-container`（保留原有作品库网格与分页逻辑）与 `#presets-view-container`（默认隐藏）。
+
+### 新增 (Added)
+
+- **预设库视图**：`#presets-view-container` 内构建顶部控制栏（标题「预设库」、统计数量、`#btn-create-preset` 主按钮）与 `#presetGrid` 响应式网格容器（`auto-fill minmax(200px, 1fr)`，统一 3:4 宽高比）。
+- **预设卡片组件**：每个 `.preset-card` 含 `.preset-thumb-wrapper`（缩略图容器，无缩略图时显示占位符）、`.preset-hover-overlay`（悬浮操作遮罩，含「⚡ 载入 / ⟳ 覆盖 / ✎ 改名 / 🗑 删除」四个差异化按钮）与 `.preset-info`（名称 + 收藏星标）。
+- **卡片 Hover 动效**：遮罩默认 `opacity: 0`，卡片 hover/focus-within 时淡入；卡片上浮、缩略图轻微缩放、按钮差异化配色（载入蓝、覆盖/改名半透明白、删除红），并补充 620px 断点移动端适配。
+- 前端新增 `switchMainTab()` 函数处理作品库/预设库 Tab 切换，`createStylePreset()` 改为弹窗输入名称模式。
+
+### 新增 (Added) · 业务交互与状态联动闭环
+
+- **四大悬浮按钮功能落地**：`.btn-load` 一键载入改为以预设 `settings` 为基准全量覆盖工作台（提示词池、LoRA、画师、主模型、分辨率、步数、CFG、采样器等），Toast 提示「已载入预设：【预设名】」；`.btn-overwrite` 弹出确认弹窗（含「同步更新缩略图」勾选框，勾选后以作品库最新生成图作为新封面，经 `source_image_id` 提交）；`.btn-rename` 弹出改名弹窗并做 1~100 字符与同名前端校验，提交 `PATCH /api/style-presets/{id}`；`.btn-delete` 弹出二次确认弹窗，成功后执行卡片淡出移除动画并同步更新总数。
+- **「+ 新建预设」模态框流程**：`#btn-create-preset` 改为打开模态框，表单含必填名称、封面缩略图预览与「更换本地图片」上传按钮；默认自动取作品库最新生成图（`historyItems[0]`）作为封面预览，支持上传本地图片（`multipart/form-data`）或回退到最新作品图，确认后打包当前工作台全量 `settings` 提交 `POST /api/style-presets`，新增预设排在列表首位。
+- 前端 `request()` 支持 `FormData` 请求体（不再强制 JSON `Content-Type`），以适配缩略图 multipart 上传。
+- 预设卡片网格列宽与间距对齐作品库 `.gallery`（`minmax(215px, 1fr)` / `gap: 14px`），确保两类卡片尺寸规格统一；新增 `.preset-card.is-removing` 淡出动画与新建预设封面选择样式。
+
+### 修复 (Fixed)
+
+- **修复启动报错「界面资源版本不一致，缺少控件：btnCreatePreset、tabBtnGallery、tabBtnPresets、galleryCount、presetsCount、galleryViewContainer、presetsViewContainer」**：根因是新增的预设库标签页控件在 `static/index.html` 中使用了连字符式 id（如 `btn-create-preset`、`tab-btn-gallery`），而 `static/app.js` 的 `ui` 映射键名是驼峰式（`btnCreatePreset`、`tabBtnGallery`），且映射逻辑 `document.getElementById(id)` 直接以键名取元素、不做命名转换。项目其余控件 id 均为驼峰式，故仅这 7 个新控件取不到元素、触发 `missingUi` 校验抛错。现将这 7 个 id 统一改为驼峰式（`btnCreatePreset`/`tabBtnGallery`/`tabBtnPresets`/`galleryCount`/`presetsCount`/`galleryViewContainer`/`presetsViewContainer`），并同步更新 `aria-controls`/`aria-labelledby` 引用与 `static/styles.css` 中的 `#presetsViewContainer` 选择器。
+- 同步调整 `static/app.js` 的 UI 元素引用列表：移除已删除的 `presetName`/`savePreset`/`presetList`，新增 `presetGrid`/`btnCreatePreset`/`tabBtnGallery`/`tabBtnPresets`/`galleryCount`/`presetsCount`/`galleryViewContainer`/`presetsViewContainer`，避免 `missingUi` 校验抛错。
+- 补充 `tests/test_server.py` 回归断言：断言预设库标签页 7 个控件（驼峰式 id）随 HTML 一同下发，防止同类命名不一致问题复发。
+- 作品库计数更新时同步刷新 `#gallery-count` 徽章，保持与 `#historyCount` 一致。
+- 清理 `static/styles.css` 中失效的旧预设样式（`.preset-create-row`/`.preset-list`/`.preset-row`/`.preset-apply`/`.preset-actions`）。
 
 ## ？？？
 

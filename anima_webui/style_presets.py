@@ -32,6 +32,11 @@ def _locked(method: Any) -> Any:
 
 
 PRESET_SETTING_KEYS = (
+    # 人物构成与角色细节:与 DEFAULT_SETTINGS 的 female_count/male_count/character_detail 对齐,
+    # 否则保存/载入预设时人物构成(几女几男)与角色细节模式会被丢弃或触发未知参数报错。
+    "female_count",
+    "male_count",
+    "character_detail",
     "model_name",
     "loras",
     "lora_managed_triggers",
@@ -77,11 +82,14 @@ def preset_settings(
 ) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise WorkflowError("风格预设 settings 必须是对象")
-    unknown = set(value) - set(PRESET_SETTING_KEYS)
+    # 前端可能直接提交完整工作台 state(含运行期批次字段 count),
+    # 该校验前安全剔除,避免因 "count" 触发未知参数异常。
+    cleaned_value = {key: item for key, item in value.items() if key != "count"}
+    unknown = set(cleaned_value) - set(PRESET_SETTING_KEYS)
     if unknown:
         raise WorkflowError(f"风格预设包含未知参数: {', '.join(sorted(unknown))}")
     candidate = copy.deepcopy(DEFAULT_SETTINGS)
-    candidate.update(value)
+    candidate.update(cleaned_value)
     if prompt_rules is not None:
         candidate, _ = prompt_rules.normalize_settings(candidate)
     normalized = validate_settings(candidate)
@@ -93,6 +101,9 @@ class StylePresetStore:
         self.path = Path(path)
         self.prompt_rules = prompt_rules
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # 缩略图与预设 JSON 同目录下的 preset_thumbnails/,以预设 ID 命名。
+        self.thumbnail_dir = self.path.parent / "preset_thumbnails"
+        self.thumbnail_dir.mkdir(parents=True, exist_ok=True)
         self.items: list[dict[str, Any]] = []
         self.load_warnings: list[str] = []
         self._lock = asyncio.Lock()
@@ -174,8 +185,44 @@ class StylePresetStore:
         self.items = [item for item in self.items if item["id"] != preset_id]
         if len(self.items) == previous:
             return False
+        # 内存与 JSON 记录删除的同时,物理删除对应缩略图,避免孤儿文件堆积。
+        thumb_path = self.thumbnail_dir / f"{preset_id}.png"
+        if thumb_path.is_file():
+            thumb_path.unlink(missing_ok=True)
         await self._save()
         return True
+
+    @_locked
+    async def save_thumbnail(self, preset_id: str, image_bytes: bytes) -> Path:
+        """把二进制图片写入缩略图目录,以预设 ID 命名。
+
+        写盘经 to_thread 让出事件循环;先写临时文件再原子替换,
+        避免半截文件被静态路由读到。写入后同步刷新内存记录的
+        thumbnail_url,使 list() 立即反映最新封面。
+        """
+        target = self.thumbnail_dir / f"{preset_id}.png"
+        await asyncio.to_thread(self._write_thumbnail, target, image_bytes)
+        for item in self.items:
+            if item["id"] == preset_id:
+                item["thumbnail_url"] = self.thumbnail_url(preset_id)
+                break
+        return target
+
+    @staticmethod
+    def _write_thumbnail(target: Path, image_bytes: bytes) -> None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(
+            prefix="preset-thumb-", suffix=".png", dir=target.parent
+        )
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(image_bytes)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_name, target)
+        finally:
+            if os.path.exists(temp_name):
+                os.unlink(temp_name)
 
     @staticmethod
     def _now() -> str:
@@ -206,9 +253,23 @@ class StylePresetStore:
             "name": name,
             "favorite": favorite,
             "settings": preset_settings(payload.get("settings"), self.prompt_rules),
+            "thumbnail_url": self.thumbnail_url(preset_id),
             "created_at": created_at,
             "updated_at": updated_at,
         }
+
+    def thumbnail_url(self, preset_id: str) -> str | None:
+        """本地缩略图存在时返回静态资源 URL,否则返回 None。
+
+        该字段由物理文件推导而非持久化,避免 JSON 与磁盘状态不一致。
+        """
+        if (self.thumbnail_dir / f"{preset_id}.png").is_file():
+            return f"/api/style-presets/{preset_id}/thumbnail"
+        return None
+
+    def thumbnail_path(self, preset_id: str) -> Path:
+        """返回预设缩略图的物理路径(不保证存在)。"""
+        return self.thumbnail_dir / f"{preset_id}.png"
 
     async def _save(self) -> None:
         # 快照序列化在事件循环线程完成(状态一致),fsync 等慢速 I/O 移入工作线程。
