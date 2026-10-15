@@ -1,6 +1,6 @@
 # 更新日志
 
-## 未发布
+# V6.0(包括v5.0-stable)
 
 ### 新增
 
@@ -25,12 +25,12 @@
 - 新增 `tests/test_audit_bugs.py`：覆盖文件锁降级、空文件恢复与 `HistoryStore` 生命周期，作为上述边界行为的回归保护。
 - 新增缩略图回归用例：`tests/test_style_presets.py` 覆盖缩略图目录创建、`thumbnail_url` 推导、`save_thumbnail` 原子写入无残留临时文件、删除预设联动清理缩略图；`tests/test_server.py` 覆盖 multipart 上传与静态路由、`source_image_id` 引用作品库图片、以及非法 `source_image_id` 返回 400。
 
-## 未发布V2
-
 ### 变更 (Changed)
 
 - **左侧边栏瘦身**：移除左侧「生成设置」中原有的「风格预设」折叠区（`.preset-section`，含预设名称输入框、保存当前按钮与旧预设列表），使「人物构成」直连「提示词池」，释放侧边栏垂直高度。
 - **右侧主工作区顶层 Tab 化**：作品库顶部标题结构替换为平行标签页容器 `.main-tabs-header`，含「作品库」（`#tab-btn-gallery` + `#gallery-count` 徽章）与「预设库」（`#tab-btn-presets` + `#presets-count` 徽章）两组切换按钮；主显示区拆分为同级容器 `#gallery-view-container`（保留原有作品库网格与分页逻辑）与 `#presets-view-container`（默认隐藏）。
+- **作品库/预设库头部高度统一**：合并重构 `.history-header` 与 `.presets-header` 为同一套样式规则（`min-height: 58px`、`padding: 16px 0 12px`、`box-sizing: border-box`，并统一 `h1`/`p`/`.kicker` 与首列网格对齐方式），消除两个 Tab 切换时左侧标题区（Kicker 英文、H1 标题、计数文本）的上下抖动；删除原先重复且内边距不一致的 `.presets-header` 旧规则块。移动端媒体查询由纵向堆叠改为 `flex-wrap: wrap` + 操作组整行铺开，保持与作品库头部结构一致。
+- **预设库纯前端分页**：预设库头部右侧新增操作容器 `.presets-actions`，内含分页控件（`#presetPrevPage` / `#presetPageLabel` / `#presetNextPage`）与「+ 新建预设」按钮横向排布。每页展示 12 个预设（`PRESET_PAGE_SIZE = 12`），采用前端 `slice` 切片渲染，不新增任何后端请求；`renderStylePresets()` 现计算总页数、越界回正（删除等操作后当前页溢出自动收敛）、更新分页栏与按钮禁用态；新建预设成功后重置 `presetPage = 1`，确保新预设立即可见。
 
 ### 新增 (Added)
 
@@ -43,8 +43,11 @@
 
 - **四大悬浮按钮功能落地**：`.btn-load` 一键载入改为以预设 `settings` 为基准全量覆盖工作台（提示词池、LoRA、画师、主模型、分辨率、步数、CFG、采样器等），Toast 提示「已载入预设：【预设名】」；`.btn-overwrite` 弹出确认弹窗（含「同步更新缩略图」勾选框，勾选后以作品库最新生成图作为新封面，经 `source_image_id` 提交）；`.btn-rename` 弹出改名弹窗并做 1~100 字符与同名前端校验，提交 `PATCH /api/style-presets/{id}`；`.btn-delete` 弹出二次确认弹窗，成功后执行卡片淡出移除动画并同步更新总数。
 - **「+ 新建预设」模态框流程**：`#btn-create-preset` 改为打开模态框，表单含必填名称、封面缩略图预览与「更换本地图片」上传按钮；默认自动取作品库最新生成图（`historyItems[0]`）作为封面预览，支持上传本地图片（`multipart/form-data`）或回退到最新作品图，确认后打包当前工作台全量 `settings` 提交 `POST /api/style-presets`，新增预设排在列表首位。
+- **「从作品库选择封面」功能**：新建预设弹窗封面操作区新增 `#presetCreatePickHistory` 按钮，点击唤起轻量级作品库选择弹窗 `#historyPickerDialog`。弹窗以 3 列网格展示历史作品缩略图（每页 18 张），支持单击高亮选中、双击直接确认、上一页/下一页分页（`#historyPickerPrev`/`#historyPickerNext`/`#historyPickerPageLabel`）与空态提示（`#historyPickerEmpty`）。确认后回填主弹窗封面预览并设置 `presetCreateCover.sourceId`（经 `source_image_id` 提交），同时清理本地图片的 `objectURL` 释放内存。新增 `openHistoryPicker()`、`loadHistoryPicker()`、`renderHistoryPickerItems()`、`selectHistoryPickerRecord()`、`updateHistoryPickerPager()`、`applyHistoryPickerSelection()` 等函数，`loadHistoryPicker` 复用 `/api/history?page=N&limit=18` 接口并带请求竞态守卫。
 - 前端 `request()` 支持 `FormData` 请求体（不再强制 JSON `Content-Type`），以适配缩略图 multipart 上传。
 - 预设卡片网格列宽与间距对齐作品库 `.gallery`（`minmax(215px, 1fr)` / `gap: 14px`），确保两类卡片尺寸规格统一；新增 `.preset-card.is-removing` 淡出动画与新建预设封面选择样式。
+- **新建预设弹窗功能说明副标题**：`#presetCreateDialog` 标题区在 Kicker（NEW STYLE PRESET）与 H2（新建预设）下方新增 `.dialog-subtitle` 说明文本「将当前工作台的所有生图要素打包保存为预设，方便随后一键调用」，明确告知用户该功能的作用范围。`.dialog-heading` 补充 `align-items: flex-start`，保证右侧关闭按钮（×）在标题区增高后仍与顶部对齐；新增 `.dialog-heading .dialog-subtitle` 样式（`margin: 4px 0 0 0`、`font-size: 0.8125rem`、`line-height: 1.4`、`font-weight: 400`、字色取 `var(--text-secondary)`），并补充 `[data-theme="light"]` 浅色模式字色回退，确保副标题不抢主标题视觉层级。仅新增文案与样式，未改动任何 JS 逻辑。
+- **作品详情弹窗提示词一键复制**：`#detailDialog` 中「完整提示词」与「负面提示词」标题栏右侧各新增一个轻量图标按钮（`#copyPositivePrompt` / `#copyNegativePrompt`），点击后将对应 `<textarea>`（`#detailPositive` / `#detailNegative`）内容写入剪贴板。原 `<label>` 结构改造为 `.prompt-field-wrapper` + `.prompt-field-header` 头部工具栏，按钮内联嵌入 `.icon-copy`（复制）与 `.icon-check`（勾选）两枚矢量 SVG 图标。新增 `copyPromptToClipboard(text, button, successMsg)` 工具函数：优先调用 `navigator.clipboard.writeText`，不支持时回退到临时 `<textarea>` + `document.execCommand("copy")`；空内容提示「内容为空，无需复制」，成功后调用 `toast()` 反馈并切换为绿色勾选态，1.5 秒后自动恢复复制图标。`ui` 映射同步注册两个新控件，避免 `missingUi` 校验抛错。新增 `.prompt-field-wrapper` / `.prompt-field-header` / `.copy-icon-btn`（含 `:hover` / `:active` / `.copied` 成功绿态）样式，并补充 `[data-theme="light"]` 浅色模式悬停适配。
 
 ### 修复 (Fixed)
 
@@ -53,10 +56,9 @@
 - 补充 `tests/test_server.py` 回归断言：断言预设库标签页 7 个控件（驼峰式 id）随 HTML 一同下发，防止同类命名不一致问题复发。
 - 作品库计数更新时同步刷新 `#gallery-count` 徽章，保持与 `#historyCount` 一致。
 - 清理 `static/styles.css` 中失效的旧预设样式（`.preset-create-row`/`.preset-list`/`.preset-row`/`.preset-apply`/`.preset-actions`）。
+- **修复作品库选择弹窗网格「踩踏」问题**：`.history-picker-item` 为 `<button>` 元素，原样式存在循环依赖——`aspect-ratio: 3 / 4` 决定卡片高度，而 `img { height: 100% }` 又依赖卡片高度，浏览器无法解析该循环时回退为按图片原始尺寸渲染，导致图片撑高卡片、突破网格行高，下一行卡片被上一行溢出的图片覆盖。现将 `.history-picker-grid` 改为固定 3 列（`repeat(3, minmax(0, 1fr))`）并加 `grid-auto-rows: min-content`、`align-content: start`、`min-height: 0`；`.history-picker-item` 加 `display: block`、`box-sizing: border-box`、`min-width/min-height: 0`、`aspect-ratio: 1 / 1`、`overflow: hidden`、`line-height: 0`、`font-size: 0`；`.history-picker-item img` 加 `display: block` + `object-fit: cover`。改动仅限定于 `.history-picker-*` 新功能类名，不影响既有弹窗与功能。
 
-## ？？？
-
-- 作者我操你妈
+##
 
 ## [v4.0.5]
 
