@@ -48,7 +48,7 @@
 
 ### 步骤一：获取项目文件
 
-1. 前往本项目的 [Releases 页面](../../releases) 下载最新发布的压缩包（ZIP）。
+1. 前往本项目的 [Releases 页面](https://github.com/15840-LOOP/comfyui-random-image-generation-available/releases) 下载最新发布的压缩包（ZIP）。
 2. 将压缩包解压至你的 **ComfyUI 整合包根目录** 下（即与 `ComfyUI` 目录平级）。
    * 解压后的典型目录结构示例：
 
