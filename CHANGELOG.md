@@ -1,5 +1,19 @@
 # 更新日志
 
+# V6.1
+
+### 修复 (Fixed)
+
+- **修复「角色标签 - 仅触发词」模式下仍包含角色默认服装与外观特征词的问题**：此前 Node 60（`AnimaPromptComposer`）被旁路后，提示词改由 Python 侧 `resolved_selection` 注入 Node 42，但 [`PromptCatalog.resolve_prompt()`](anima_webui/catalog.py:553) 构建 `public_selected` 时直接套用静态未裁剪的 `item["prompt"]`，且 [`public_item()`](anima_webui/catalog.py:634) 丢弃了 `trigger` 字段，导致 `settings["character_detail"]` 的过滤逻辑被彻底旁路——选择「仅触发词」时仍会注入 `white pants`、`showgirl skirt` 等默认服装标签，与换装、姿势或色图词条冲突。
+- [`PromptCatalog.public_item()`](anima_webui/catalog.py:634) 现向公开条目透传 `trigger` 字段（`result["trigger"] = item.get("trigger") or []`），使前端与历史记录可还原纯触发词。
+- [`PromptCatalog.resolve_prompt()`](anima_webui/catalog.py:553) 的 `public_selected` 构建改为显式循环：对 `character` 分区调用 [`prompt_parts()`](anima_webui/catalog.py:522) 并传入当前 `character_detail` 与 `strip_people`，用裁剪结果覆写 `pub["prompt"]`。`trigger` 模式下 `resolved_selection["character"][0]["prompt"]` 即为纯触发词（角色名 + 作品来源），`trigger_tags` 模式保留完整外貌与服装标签。
+- [`render_workflows()`](anima_webui/workflow.py:861) 内的 [`get_resolved_tags()`](anima_webui/workflow.py:1003) 增加防御性适配：当分区为 `character` 且 `character_detail == "trigger"` 时优先读取 `item["trigger"]`（列表则 `", ".join`，否则 `str`），缺失时回退 `item["prompt"]`，确保历史记录中残留的未裁剪服装标签不会被注入 Node 42。
+- 硬性约束保持：未重新连接 Node 60 到 Node 42 的 `extra_prompt` 端口，未在 Node 60 中重新启用抽卡，过滤与注入全部在 Python 侧完成，避免复发提示词重复拼接 Bug。
+- 新增回归测试：`tests/test_catalog.py` 覆盖 `trigger` 字段透传与 `resolved_selection` 角色 prompt 随 `character_detail` 裁剪；`tests/test_workflow.py` 覆盖仅触发词模式下的防御性适配与 Node 60 旁路/Node 42 `extra_prompt` 断连。
+- **修复历史详情弹窗「载入设置」篡改工作台生成数量（`count`）的问题**：此前 [`applyRecordSettings()`](static/app.js:754) 直接将包含历史批次 `count` 的 `record.settings` 传入 [`applySettings()`](static/app.js:779)，导致 `ui.count.value` 被历史批次的总生成张数覆盖（例如历史批次打了 20 张，工作台张数即被改为 20）。现于应用前读取工作台当前值 `Number(ui.count.value) || 1` 并覆写 `settings.count`，与 [`loadStylePreset()`](static/app.js:3887) 的处理方式保持一致，确保载入历史图片设置时仅还原提示词、模型、采样器、分辨率等配置，不篡改用户当前输入框中的生成数量。
+- **修复历史详情弹窗「载入设置」将历史随机池（`pools`）错误注入工作台的问题**：此前 [`applyRecordSettings()`](static/app.js:754) 传入 [`applySettings()`](static/app.js:785) 的 `settings` 对象直接携带 `record.settings.pools`，触发内部 `draft.pools = clone(settings.pools || defaultPools())`，把历史批次残留的随机候选池（如 48 个角色、1 个姿势）强制灌入工作台，导致【固定模式】下卡片突兀显示「48 项已选」并冲毁用户当前已配好的卡池。现于调用前捕获工作台运行时状态 `currentPools = clone(draft.pools || defaultPools())` 并覆写 `settings.pools`，与 `count` 的保护逻辑一致——工作台当前的随机池勾选状态属于运行时状态，载入单张历史图片时不应被历史候选池覆盖。同时将入口校验由 `if (!record) return;` 收紧为 `if (!record || typeof record.settings !== "object") return;`，避免 `record.settings` 非对象时误入流程。
+- **修复随机池模式下保存风格预设导致固定提示词丢失的问题**：此前 [`readSettings()`](static/app.js:872) 对固定词采用粗暴的三元条件取值 `settings[\`fixed_${section}\`] = draft.modes[section] === "fixed" ? draft.fixed[section] || "" : "";`，混淆了「当前生效模式」与「数据持久化」的边界——当某维度处于【随机池】（`pool`）档位时，序列化设置会因当前模式非 `fixed` 而将 `draft.fixed[section]` 强制覆写为空字符串并写入预设 JSON，随后 [`applySettings()`](static/app.js:779) 还原预设时读取到空串并覆写工作台输入框缓存，造成非活动状态下的固定提示词静默丢失。现改为仅当卡池处于【关闭】（`off`）状态时才置空固定词，在【随机池】（`pool`）状态下完整保留 `draft.fixed[section]` 文本：`settings[\`fixed_${section}\`] = draft.modes[section] === "off" ? "" : (draft.fixed[section] || "");`。由于 [`applySettings()`](static/app.js:779) 的模式推导逻辑中 `random_${section}`（布尔值）优先级高于 `fixed` 文本，在 `pool` 模式下保留固定词文本不会破坏随机池的激活状态，也不影响后端生图逻辑。
+
 # V6.0(包括v5.0-stable)
 
 ### 新增

@@ -605,10 +605,25 @@ class PromptCatalog:
             if not settings.get(f"random_{section}"):
                 append(split_prompt(settings.get(f"fixed_{section}")))
         append(composer_parts)
-        public_selected = {
-            section: [self.public_item(item) for item in entries]
-            for section, entries in selected.items()
-        }
+        public_selected: dict[str, list[dict[str, Any]]] = {}
+        for section, entries in selected.items():
+            section_items = []
+            for entry in entries:
+                pub = self.public_item(entry)
+                if section == "character":
+                    # 依据当前 character_detail 裁剪实际 prompt:
+                    # "trigger" 仅保留纯触发词(角色名 + 作品来源),
+                    # "trigger_tags" 保留完整外貌与服装标签。
+                    # 避免历史记录/载入设置回填未抽取的默认服装词。
+                    parts = self.prompt_parts(
+                        entry,
+                        section,
+                        settings.get("character_detail", "trigger_tags"),
+                        strip_people,
+                    )
+                    pub["prompt"] = ", ".join(parts)
+                section_items.append(pub)
+            public_selected[section] = section_items
         return {
             "composer_prompt": f"{', '.join(composer_parts)}, " if composer_parts else "",
             "full_prompt": f"{', '.join(full_parts)}, " if full_parts else "",
@@ -626,6 +641,7 @@ class PromptCatalog:
         )
         result = {key: item.get(key) for key in keys}
         result["tags"] = item.get("tags") or []
+        result["trigger"] = item.get("trigger") or []
         return result
 
     def get(self, item_id: str) -> dict[str, Any] | None:

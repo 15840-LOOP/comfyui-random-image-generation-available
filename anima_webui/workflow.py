@@ -1002,11 +1002,21 @@ def render_workflows(
 
     def get_resolved_tags(section_name: str) -> str:
         if resolved_selection and resolved_selection.get(section_name):
-            return ", ".join(
-                item.get("prompt") or ", ".join(item.get("tags", []))
-                for item in resolved_selection[section_name]
-                if item
-            )
+            parts = []
+            for item in resolved_selection[section_name]:
+                if not item:
+                    continue
+                if section_name == "character" and settings.get("character_detail") == "trigger":
+                    # 防御性适配:仅触发词模式下优先使用纯触发词,
+                    # 避免历史记录中残留的默认服装/外观标签被注入。
+                    trigger = item.get("trigger")
+                    if trigger:
+                        parts.append(", ".join(trigger) if isinstance(trigger, list) else str(trigger))
+                    else:
+                        parts.append(item.get("prompt", ""))
+                else:
+                    parts.append(item.get("prompt") or ", ".join(item.get("tags", [])))
+            return ", ".join(filter(None, parts))
         return ""
 
     # 1. 人数

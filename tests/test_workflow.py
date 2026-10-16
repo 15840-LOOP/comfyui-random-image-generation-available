@@ -441,6 +441,58 @@ class WorkflowTests(unittest.TestCase):
         settings = validate_settings({**DEFAULT_SETTINGS, "manual_artist": "anmi, @rella"})
         self.assertEqual(settings["manual_artist"], "@anmi, @rella")
 
+    def test_resolved_selection_character_uses_trigger_only_in_trigger_mode(self):
+        # 回归:仅触发词模式下,即便历史记录中的 prompt 残留默认服装/外观标签,
+        # get_resolved_tags 也必须优先使用 trigger,避免污染换装/色图词条。
+        selection = {
+            "character": [
+                {
+                    "id": "character:shu||arknights",
+                    "prompt": "shu (arknights), arknights, white pants, white jacket",
+                    "trigger": ["shu (arknights)", "arknights"],
+                    "tags": ["white pants", "white jacket"],
+                }
+            ]
+        }
+        trigger_api, _ = render_workflows(
+            self.api,
+            self.ui,
+            {**DEFAULT_SETTINGS, "random_character": True, "character_detail": "trigger"},
+            1,
+            2,
+            "test",
+            resolved_selection=selection,
+        )
+        character_tags = trigger_api["42"]["inputs"]["character_tags"]
+        self.assertIn("shu (arknights)", character_tags)
+        self.assertIn("arknights", character_tags)
+        self.assertNotIn("white pants", character_tags)
+        self.assertNotIn("white jacket", character_tags)
+
+        full_api, _ = render_workflows(
+            self.api,
+            self.ui,
+            {**DEFAULT_SETTINGS, "random_character": True, "character_detail": "trigger_tags"},
+            1,
+            2,
+            "test",
+            resolved_selection=selection,
+        )
+        full_tags = full_api["42"]["inputs"]["character_tags"]
+        self.assertIn("white pants", full_tags)
+        self.assertIn("white jacket", full_tags)
+
+    def test_composer_extra_prompt_link_stays_disconnected(self):
+        # 回归:Node 60 必须保持旁路,Node 42 的 extra_prompt 不得回连合成器,
+        # 否则会复发提示词重复拼接 Bug。
+        api, ui = render_workflows(self.api, self.ui, DEFAULT_SETTINGS, 1, 2, "test")
+        self.assertIsInstance(api["42"]["inputs"]["extra_prompt"], str)
+        positive_ui = next(node for node in ui["nodes"] if node["id"] == 42)
+        extra_input = next(item for item in positive_ui["inputs"] if item["name"] == "extra_prompt")
+        self.assertIsNone(extra_input["link"])
+        composer_ui = next(node for node in ui["nodes"] if node["id"] == 60)
+        self.assertEqual(composer_ui["mode"], 4)
+
     def test_submission_embeds_recoverable_workflow(self):
         payload = build_submission(self.api, self.ui, DEFAULT_SETTINGS, 11, 12, "prefix", "client", 1)
         self.assertIn("prompt", payload)

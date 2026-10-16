@@ -142,6 +142,41 @@ class CatalogTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("1boy", first["composer_prompt"])
         self.assertEqual(len(first["selected"]["character"]), 1)
 
+    def test_public_item_exposes_trigger_field(self):
+        # 回归:public_item 必须透传 trigger,否则前端/历史记录无法还原纯触发词。
+        item = self.catalog.get("character:alpha||series")
+        self.assertIsNotNone(item)
+        public = self.catalog.public_item(item)
+        self.assertEqual(public["trigger"], ["alpha", "series"])
+
+    def test_resolved_selection_character_prompt_follows_character_detail(self):
+        # 回归:仅触发词模式下 resolved_selection 的角色 prompt 不得包含默认服装/外观标签,
+        # 否则历史记录与「载入设置」会回填未抽取的服装词污染换装/色图词条。
+        pools = {**DEFAULT_SETTINGS["pools"], "character": {"mode": "include", "ids": ["character:alpha||series"], "excluded_ids": []}}
+        trigger_settings = validate_settings({
+            **DEFAULT_SETTINGS,
+            "random_character": True,
+            "random_character_count": 1,
+            "character_detail": "trigger",
+            "pools": pools,
+        })
+        trigger_resolved = self.catalog.resolve_prompt(trigger_settings, 7)
+        trigger_prompt = trigger_resolved["selected"]["character"][0]["prompt"]
+        self.assertEqual(trigger_prompt, "alpha, series")
+        self.assertNotIn("blue eyes", trigger_prompt)
+
+        full_settings = validate_settings({
+            **DEFAULT_SETTINGS,
+            "random_character": True,
+            "random_character_count": 1,
+            "character_detail": "trigger_tags",
+            "pools": pools,
+        })
+        full_resolved = self.catalog.resolve_prompt(full_settings, 7)
+        full_prompt = full_resolved["selected"]["character"][0]["prompt"]
+        self.assertIn("alpha", full_prompt)
+        self.assertIn("blue eyes", full_prompt)
+
     def test_include_selection_keeps_selection_order(self):
         # 回归:include 候选曾经过 set 去重,迭代顺序随进程哈希种子漂移,
         # 固定 prompt_seed 的"复现"在 WebUI 重启后会抽出不同条目。

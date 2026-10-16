@@ -752,26 +752,32 @@ function getEffectivePromptForSection(image, section) {
  * @param {Object} record 历史记录详情对象 (含 settings 与 resolved_selection)
  */
 function applyRecordSettings(record) {
-  if (!record) return;
+  if (!record || typeof record.settings !== "object") return;
+
+  // 1. 保护工作台当前的运行时状态（生成数量与卡池选择），防止被历史数据冲毁
+  const currentCount = Number(ui.count?.value) || 1;
+  const currentPools = clone(draft.pools || defaultPools());
+
   const settings = clone(record.settings || {});
-  // 先按常规流程还原模型、采样、人物、LoRA 等全部参数。
+  settings.count = currentCount;
+  settings.pools = currentPools; // 拦截历史候选池，保留工作台当前配置
+
+  // 2. 先按常规流程还原模型、采样、人物、LoRA 等全部画面特征参数
   applySettings(settings);
 
-  // 再对 5 大卡池执行双轨提取,覆盖 applySettings 依据 random_*/fixed_* 的粗判结果。
+  // 3. 对 5 大卡池执行双轨提取，固化实际使用的提示词并锁定为【固定】模式
   for (const section of SECTIONS) {
     const promptText = getEffectivePromptForSection(record, section);
     if (promptText) {
-      // 1. 有效提示词填入固定提示词数据状态与输入框
       draft.fixed[section] = promptText;
-      // 2. 抽取模式锁定为最右侧的【固定】
       draft.modes[section] = "fixed";
     } else {
-      // 3. 只有确实无任何有效词条时,才清空并关闭该卡池
       draft.fixed[section] = "";
       draft.modes[section] = "off";
     }
   }
-  // 依据修正后的 draft 重新渲染 5 大卡池 UI(激活对应模式高亮并回填输入框)。
+
+  // 4. 重新渲染工作台维度卡片与概览
   renderDimensions();
   updatePoolOverview();
 }
@@ -866,7 +872,7 @@ function readSettings() {
   for (const section of SECTIONS) {
     settings[`random_${section}`] = draft.modes[section] === "pool";
     settings[`random_${section}_count`] = Number(draft.counts[section] || 1);
-    settings[`fixed_${section}`] = draft.modes[section] === "fixed" ? draft.fixed[section] || "" : "";
+    settings[`fixed_${section}`] = draft.modes[section] === "off" ? "" : (draft.fixed[section] || "");
   }
   return settings;
 }
