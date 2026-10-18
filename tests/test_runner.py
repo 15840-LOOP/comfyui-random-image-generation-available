@@ -1399,25 +1399,139 @@ class RegenerationBackfillTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await history.close()
 
-    async def test_repin_does_not_change_changed_flag(self):
-        """回填不得影响 _changed 判定:它只看 redraw_sections 的 id 是否变化。"""
+    async def test_backfill_does_not_pollute_redraw_dimension_or_changed_flag(self):
+        """重抽维度真的变了时:_changed 必须仍为 True,且该维度不被固定词覆盖。
+
+        旧版本断言的是"回填 background + 重抽 character 未变 → changed 为 False",
+        但那个 False 由构造本身决定(redraw_sections 只有 character 且恒不变),
+        任何实现都会通过,等于没测。这里改为让 character 真的变化,并同时放一个
+        残留 fixed_background:随机维度不得被回填,重抽结果也不得被替换成伪条目。
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            history = HistoryStore(Path(directory) / "history.sqlite3")
+            try:
+                manager = BatchManager(FakeTemplates(), history, FakeComfy(), RedrawCatalog())
+                # background 是随机维度,但残留了 fixed_background(Task 4 之前
+                # 的老记录 + 前端仍会提交 draft.fixed 的典型形态)。
+                settings = validate_settings(
+                    {
+                        "count": 1,
+                        "random_character": True,
+                        "random_background": True,
+                        "fixed_background": "forest",
+                    }
+                )
+                resolved = manager._resolve_regeneration(
+                    settings,
+                    5,
+                    {
+                        "mode": "content_redraw",
+                        "redraw_sections": ["character"],
+                        "fixed_selection": {},
+                        "original_selection": {"character": [{"id": "character:old"}]},
+                    },
+                )
+                # 1) 重抽维度确实换了(character:old -> character:new),changed 为 True。
+                self.assertTrue(resolved["_changed"], "重抽结果变化必须被判定为 changed")
+                characters = resolved["selected"]["character"]
+                self.assertEqual(characters[0]["id"], "character:new")
+                # 2) 重抽维度没被固定词伪条目替换(id 不为空、无 fixed 标记)。
+                self.assertNotEqual(characters[0]["id"], "")
+                self.assertFalse(characters[0].get("fixed"))
+                # 3) 随机背景维度即使有残留 fixed_background 也不能被回填成固定。
+                self.assertEqual(resolved["selected"].get("background") or [], [])
+            finally:
+                await history.close()
+
+    async def test_backfill_result_never_feeds_changed_flag(self):
+        """区分力用例:回填的维度恰好也在 redraw_sections 里时,_changed 仍须按回填前算。
+
+        这是唯一能区分"用 merged 算 changed"与"用回填后结果算 changed"的构造:
+        redraw_sections 含 background(固定维度,重抽不会产出条目),快照为空,
+        因此回填前 background 前后都是空 → 未变化(False);一旦用回填后结果去比,
+        伪条目的空 id 会让它变成"变了"(True),从而污染判定。
+        """
         with tempfile.TemporaryDirectory() as directory:
             history = HistoryStore(Path(directory) / "history.sqlite3")
             try:
                 manager = BatchManager(FakeTemplates(), history, FakeComfy(), RedrawCatalog())
                 settings = validate_settings(
-                    {"count": 1, "random_character": True, "fixed_background": "forest"}
+                    {
+                        "count": 1,
+                        "random_character": True,
+                        "random_background": False,
+                        "fixed_background": "forest",
+                    }
                 )
-                regeneration = {
-                    "mode": "content_redraw",
-                    "redraw_sections": ["character"],
-                    "fixed_selection": {},
-                    "original_selection": {"character": [{"id": "character:new"}]},
-                }
-                resolved = manager._resolve_regeneration(settings, 5, regeneration)
-                # original 已是 character:new,RedrawCatalog 也只产出该 id → 未变化。
-                self.assertFalse(resolved["_changed"])
-                self.assertTrue(resolved["selected"]["background"][0]["fixed"])
+                resolved = manager._resolve_regeneration(
+                    settings,
+                    5,
+                    {
+                        "mode": "content_redraw",
+                        "redraw_sections": ["background"],
+                        "fixed_selection": {},
+                        "original_selection": {"background": []},
+                    },
+                )
+                # 回填确实把固定背景写进去了(否则本用例退化为空断言)。
+                backgrounds = resolved["selected"]["background"]
+                self.assertEqual(len(backgrounds), 1)
+                self.assertTrue(backgrounds[0]["fixed"])
+                # ...但 _changed 必须按回填前判定:背景前后皆空 → False。
+                # 若实现改用回填后结果,伪条目的空 id 会让这里变成 True。
+                self.assertFalse(
+                    resolved["_changed"],
+                    "回填结果不得参与 _changed 判定",
+                )
+            finally:
+                await history.close()
+
+    async def test_random_section_is_not_backfilled_with_stale_fixed_text(self):
+        """随机维度不得被残留 fixed_* 回填成 fixed 伪条目。
+
+        前端在 pool 模式下仍会提交残留的 draft.fixed[section],validate_settings
+        也不清空 fixed_*;老记录的空快照若碰上这类残留,不加 random_* 守卫就会把
+        "其实是随机维度"的维度显示成"(固定)"——与真实情况相反。
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            history = HistoryStore(Path(directory) / "history.sqlite3")
+            try:
+                manager = BatchManager(FakeTemplates(), history, FakeComfy(), RedrawCatalog())
+                settings = validate_settings(
+                    {
+                        "count": 1,
+                        "random_character": True,
+                        "random_pose": True,
+                        "random_clothing": True,
+                        "random_background": True,
+                        "random_expression": True,
+                        "fixed_background": "forest, outdoors",
+                        "fixed_clothing": "red coat",
+                    }
+                )
+                resolved = manager._resolve_regeneration(
+                    settings,
+                    9,
+                    {
+                        "mode": "content_redraw",
+                        "redraw_sections": ["character"],
+                        "fixed_selection": {},
+                        "original_selection": {},
+                    },
+                )
+                # 直接验证守卫本身:随机维度 + 残留 fixed_* + 空快照,回填必须什么都不做。
+                self.assertEqual(
+                    manager._backfill_fixed_sections(settings, {}),
+                    {},
+                    "随机维度不得被残留 fixed_* 回填",
+                )
+                # 并且红raw 结果里这些随机维度不能出现 fixed=True 的伪条目。
+                selected = resolved["selected"]
+                for section in ("background", "clothing", "pose"):
+                    for item in selected.get(section) or []:
+                        self.assertFalse(
+                            item.get("fixed"), f"{section} 被错误回填成固定伪条目"
+                        )
             finally:
                 await history.close()
 

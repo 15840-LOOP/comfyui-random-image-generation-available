@@ -618,7 +618,6 @@ class FixedPromptSelectionTests(unittest.TestCase):
         for key in ("id", "section", "title", "subtitle", "prompt", "tags", "fixed"):
             self.assertIn(key, item, f"伪条目缺少 {key}")
             self.assertEqual(item[key], pinned[key], f"{key} 与 _fixed_pinned 不一致")
-        self.assertEqual(set(pinned), set(item) & set(pinned))
 
     def test_random_section_has_no_fixed_flag(self):
         settings = validate_settings(

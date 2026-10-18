@@ -1522,6 +1522,8 @@ function renderDetail(record) {
     : "未使用";
   // 固定词维度在历史记录里可能是空数组(旧数据),此时回退读 settings.fixed_*
   // 并标注"（固定）",避免详情弹窗把实际用了固定词的维度显示成"未使用"。
+  // 必须同时判断 random_<section>:随机维度里残留的 fixed_* 文本不代表实际抽取结果,
+  // 拿它兜底会把"其实是随机维度"显示成固定,方向反了。
   ui.detailSelection.innerHTML = `<span class="kicker">ACTUAL DRAW</span><div>${SECTIONS.map((section) => {
     const items = selected[section] || [];
     let text;
@@ -1529,7 +1531,9 @@ function renderDetail(record) {
       text = items.map((item) => escapeHtml(item.title)).join("、");
     } else {
       const fixedText = String((settings && settings[`fixed_${section}`]) || "").trim();
-      text = fixedText ? `${escapeHtml(fixedText)}（固定）` : "未使用";
+      text = !(settings && settings[`random_${section}`]) && fixedText
+        ? `${escapeHtml(fixedText)}（固定）`
+        : "未使用";
     }
     return `<span><b>${SECTION_META[section].label}</b>${text}</span>`;
   }).join("")}<span><b>LoRA</b>${loraText}</span></div>`;

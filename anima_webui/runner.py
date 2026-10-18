@@ -610,9 +610,19 @@ class BatchManager:
 
         与 catalog.resolve_prompt 的固定分支共用 fixed_selection_item(),
         保证两处条目同构(组合规则 _pick_hit 对 fixed 条目按完整 tag 集判身份)。
+
+        守卫顺序与 _fixed_pinned() 保持一致:`random_*` 为真的维度**永不回填**。
+        否则该维度只是"这一张快照里为空"(例如 Task 4 之前落库的老记录),残留的
+        fixed_* 文本会被塞进去标成 fixed=True,详情弹窗就把它显示成"(固定)"——
+        正是本任务要治的"显示与实际不符",方向反了。
+
+        本函数只往非 redraw_sections 的维度写,而 _resolve_regeneration 的
+        changed 判定只读 redraw_sections 的 id,因此回填不影响变更判定。
         """
         result = dict(selected)
         for section in PROMPT_SECTIONS:
+            if settings.get(f"random_{section}"):
+                continue
             if result.get(section):
                 continue
             fixed_text = str(settings.get(f"fixed_{section}") or "").strip()
