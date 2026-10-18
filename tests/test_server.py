@@ -1288,6 +1288,23 @@ class CombinationRuleRoutesTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.post("/api/combination-rules", json=["picks"])
         self.assertEqual(response.status, 400)
 
+    async def test_create_rejects_fixed_prompt_dimension_with_clear_message(self):
+        """固定维度不参与匹配:前端传空 id 时应立刻得到明确 400,而不是建成死规则。"""
+        response = await self.client.post(
+            "/api/combination-rules",
+            json={
+                "picks": {
+                    "character": {"id": "", "label": "固定角色"},
+                    "clothing": {"id": "clothing:y", "label": "服装Y"},
+                }
+            },
+        )
+        self.assertEqual(response.status, 400)
+        self.assertIn("固定提示词维度不能用于组合规则", (await response.json())["error"])
+        self.assertEqual(
+            (await (await self.client.get("/api/combination-rules")).json())["count"], 0
+        )
+
     async def test_duplicate_picks_are_idempotent(self):
         first = await (await self.client.post(
             "/api/combination-rules", json={"picks": self._picks()}

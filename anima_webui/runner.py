@@ -88,17 +88,37 @@ class BatchManager:
             return None
         return rules.match
 
-    def _resolve_catalog_prompt(self, settings: dict[str, Any], prompt_seed: int) -> dict[str, Any]:
+    def _resolve_catalog_prompt(
+        self,
+        settings: dict[str, Any],
+        prompt_seed: int,
+        pinned: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """按当前配置抽取提示词。
 
         只有在确实配置了组合规则时才传 blocked,未配置时保持旧调用形态:
         这样按旧签名实现的目录替身/外部插件不会被新关键字参数打挂,
         resolve_prompt 的 blocked 也因此始终是可选参数。
+
+        pinned 用于 content_redraw:未重抽的维度在 resolve_prompt 内部会被
+        `random_*=False` 跳过,因而恒不出现在它构造的 selection 里,而
+        CombinationRuleStore.match() 要求规则里所有维度都命中。把已固定的
+        条目并进 trial 再交给 blocked,规则才能对固定维度生效,同时仍复用
+        resolve_prompt 自己的"换种子重抽 + 用尽报错"语义。
         """
         blocked = self._blocked()
         if blocked is None:
             return self.catalog.resolve_prompt(settings, prompt_seed)
-        return self.catalog.resolve_prompt(settings, prompt_seed, blocked=blocked)
+        if not pinned:
+            return self.catalog.resolve_prompt(settings, prompt_seed, blocked=blocked)
+
+        def blocked_with_pinned(trial: dict[str, list[dict[str, Any]]]) -> str | None:
+            merged = {**trial, **copy.deepcopy(pinned)}
+            return blocked(merged)
+
+        return self.catalog.resolve_prompt(
+            settings, prompt_seed, blocked=blocked_with_pinned
+        )
 
     @staticmethod
     def _validate_regeneration(value: Any) -> dict[str, Any] | None:
@@ -553,6 +573,9 @@ class BatchManager:
         mode = regeneration["mode"]
         fixed_selection = copy.deepcopy(regeneration.get("fixed_selection") or {})
         if mode in {"replay", "prompt_variant"}:
+            # 复现原图不复检组合规则:这两个模式的语义是把历史图片的最终提示词
+            # 原样回放,selection 直接取自历史快照。规则后来才新增也允许复现旧图,
+            # 否则"复现此图"会在规则变更后突然失败。这是有意为之,不是遗漏。
             positive = regeneration["frozen_positive_prompt"]
             return {
                 "composer_prompt": positive,
@@ -582,7 +605,9 @@ class BatchManager:
                     )
                 )
             redraw_settings[f"fixed_{section}"] = ", ".join(parts)
-        resolved = self._resolve_catalog_prompt(redraw_settings, prompt_seed)
+        resolved = self._resolve_catalog_prompt(
+            redraw_settings, prompt_seed, pinned=fixed_selection or None
+        )
         merged = copy.deepcopy(resolved["selected"])
         for section, entries in fixed_selection.items():
             merged[section] = copy.deepcopy(entries)

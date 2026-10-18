@@ -1,4 +1,6 @@
 import asyncio
+import copy
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,7 +10,7 @@ import sys
 APP_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP_DIR))
 
-from anima_webui.catalog import CatalogError  # noqa: E402
+from anima_webui.catalog import CatalogError, PromptCatalog  # noqa: E402
 from anima_webui.combination_rules import CombinationRuleStore  # noqa: E402
 from anima_webui.comfy import ComfyAborted  # noqa: E402
 from anima_webui.history import HistoryStore  # noqa: E402
@@ -100,6 +102,13 @@ class FakeComfy:
 
 
 class RedrawCatalog(FakeCatalog):
+    """按真实 PromptCatalog 的语义抽取:未启用 random_* 的维度不出现在 selected 里。
+
+    真实 resolve_prompt 对 `random_<section>` 为假的维度直接 continue,
+    因此固定维度必须由 runner 在事后合并进 selected。替身若无视这个开关,
+    content_redraw 下"固定维度缺失 → 组合规则静默失效"的缺陷会被掩盖。
+    """
+
     MAX_REDRAW_ATTEMPTS = 20
 
     def prompt_parts(self, item, section, character_detail="trigger_tags", strip_person_tags=False):
@@ -108,22 +117,33 @@ class RedrawCatalog(FakeCatalog):
     def resolve_prompt(self, settings, prompt_seed, blocked=None):
         character = {"id": "character:new", "title": "character:new", "prompt": "character:new"}
         fixed_character = settings.get("fixed_character") or ""
-        pose = None
-        # 与真实 PromptCatalog 一致:命中组合规则时换种子重抽,而非直接返回被禁组合。
-        for attempt in range(self.MAX_REDRAW_ATTEMPTS):
-            pose_id = "pose:new" if (prompt_seed + attempt) % 2 else "pose:old"
-            candidate = {"id": pose_id, "title": pose_id, "prompt": pose_id}
-            if blocked is None or not blocked(
-                {"character": [character], "pose": [candidate]}
-            ):
-                pose = candidate
-                break
-        if pose is None:
-            raise AssertionError("RedrawCatalog 的候选姿势全被组合规则排除")
+        selected = {}
+        if settings.get("random_character"):
+            selected["character"] = [character]
+        if settings.get("random_pose"):
+            pose = None
+            last_rule = ""
+            for attempt in range(self.MAX_REDRAW_ATTEMPTS):
+                # 三个候选,确保被禁项即使被选中也仍是"变了"的合法结果,
+                # 否则 _changed 重试会替规则兜底、掩盖规则失效。
+                pose_id = ("pose:old", "pose:new", "pose:other")[
+                    (prompt_seed + attempt) % 3
+                ]
+                candidate = {"id": pose_id, "title": pose_id, "prompt": pose_id}
+                trial = {**selected, "pose": [candidate]}
+                last_rule = (blocked(trial) if blocked is not None else None) or ""
+                if not last_rule:
+                    pose = candidate
+                    break
+            if pose is None:
+                # 与真实 PromptCatalog 一致:点名最后命中的规则 id。
+                raise CatalogError(f"pose 维度无法避开组合规则 {last_rule}")
+            selected["pose"] = [pose]
+        pose_id = selected.get("pose", [{}])[0].get("id", "")
         return {
-            "composer_prompt": f"{fixed_character}, {pose['id']}, ",
-            "full_prompt": f"quality, {fixed_character}, {pose['id']}, ",
-            "selected": {"character": [character], "pose": [pose]},
+            "composer_prompt": f"{fixed_character}, {pose_id}, ",
+            "full_prompt": f"quality, {fixed_character}, {pose_id}, ",
+            "selected": selected,
         }
 
 
@@ -237,6 +257,18 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BatchManagerTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def redraw_settings(**overrides):
+        """RedrawCatalog 只在 random_* 为真时把该维度放进 selected,这里显式打开。"""
+        settings = {
+            **DEFAULT_SETTINGS,
+            "count": 1,
+            "random_character": True,
+            "random_pose": True,
+        }
+        settings.update(overrides)
+        return settings
+
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.history = HistoryStore(Path(self.temp.name) / "history.sqlite3")
@@ -434,11 +466,14 @@ class BatchManagerTests(unittest.IsolatedAsyncioTestCase):
             "fixed_selection": {"character": original["character"]},
             "original_selection": original,
         }
-        await manager.start({**DEFAULT_SETTINGS, "count": 1}, regeneration=regeneration)
+        await manager.start(self.redraw_settings(), regeneration=regeneration)
         await manager.wait()
         submitted = self.comfy.submissions[-1]
         self.assertEqual(submitted["resolved_selection"]["character"], original["character"])
-        self.assertEqual(submitted["resolved_selection"]["pose"][0]["id"], "pose:new")
+        # 重抽维度必须换成与原图不同的姿势(候选含 old/new/other)。
+        self.assertNotEqual(
+            submitted["resolved_selection"]["pose"][0]["id"], "pose:old"
+        )
 
     async def test_invalid_seeds_are_rejected(self):
         for bad in ({"sample_seed": -1, "prompt_seed": 1}, {"sample_seed": 1}, {"x": 1}, [1, 2], {"sample_seed": True, "prompt_seed": 1}):
@@ -643,13 +678,13 @@ class BatchManagerTests(unittest.IsolatedAsyncioTestCase):
         for prompt_seed in (0, 2, 4):
             with self.subTest(prompt_seed=prompt_seed):
                 await manager.start(
-                    {**DEFAULT_SETTINGS, "count": 1},
+                    self.redraw_settings(),
                     seeds={"sample_seed": 3, "prompt_seed": prompt_seed},
                 )
                 await manager.wait()
                 submitted = self.comfy.submissions[-1]
-                self.assertEqual(
-                    submitted["resolved_selection"]["pose"][0]["id"], "pose:new"
+                self.assertNotEqual(
+                    submitted["resolved_selection"]["pose"][0]["id"], "pose:old"
                 )
 
     async def test_regeneration_redraw_also_respects_combination_rules(self):
@@ -685,10 +720,299 @@ class BatchManagerTests(unittest.IsolatedAsyncioTestCase):
                 "pose": [{"id": "pose:old", "title": "pose:old", "prompt": "pose:old"}],
             },
         }
-        await manager.start({**DEFAULT_SETTINGS, "count": 1}, regeneration=regeneration)
+        await manager.start(self.redraw_settings(), regeneration=regeneration)
         await manager.wait()
         submitted = self.comfy.submissions[-1]
-        self.assertEqual(submitted["resolved_selection"]["pose"][0]["id"], "pose:new")
+        self.assertNotEqual(
+            submitted["resolved_selection"]["pose"][0]["id"], "pose:old"
+        )
+
+    async def test_content_redraw_rule_hits_a_dimension_that_is_not_redrawn(self):
+        """回归:content_redraw 只重抽部分维度时,规则涉及固定维度也必须生效。
+
+        此前 redraw_settings 把固定维度设成 random_*=False,resolve_prompt 因此
+        不会把它们放进 selected,而 match() 要求规则里所有维度都命中 ——
+        规则会静默失效,被禁组合照样进入提交载荷。
+
+        original_selection 刻意设为 pose:new(而非被禁的 pose:old),这样"抽到
+        pose:old"本身就构成 _changed,不会被"必须发生变化"的重试逻辑顺手排除,
+        规则是否真的生效才有区分力。
+        """
+        store = CombinationRuleStore(Path(self.temp.name) / "redraw_fixed_dimension.json")
+        rule = await store.create(
+            {
+                "picks": {
+                    "character": {"id": "character:new", "label": "new"},
+                    "pose": {"id": "pose:old", "label": "old"},
+                }
+            }
+        )
+        manager = BatchManager(
+            FakeTemplates(),
+            self.history,
+            self.comfy,
+            RedrawCatalog(),
+            combination_rules=store,
+        )
+        fixed_character = [
+            {"id": "character:new", "title": "character:new", "prompt": "character:new"}
+        ]
+        regeneration = {
+            "mode": "content_redraw",
+            "redraw_sections": ["pose"],
+            "fixed_selection": {"character": fixed_character},
+            "original_selection": {
+                "character": fixed_character,
+                "pose": [{"id": "pose:new", "title": "pose:new", "prompt": "pose:new"}],
+            },
+        }
+        for prompt_seed in (0, 1, 2, 3):
+            with self.subTest(prompt_seed=prompt_seed):
+                await manager.start(
+                    self.redraw_settings(),
+                    seeds={"sample_seed": 3, "prompt_seed": prompt_seed},
+                    regeneration=regeneration,
+                )
+                await manager.wait()
+                submitted = self.comfy.submissions[-1]
+                self.assertNotIn(
+                    "pose:old",
+                    [item["id"] for item in submitted["resolved_selection"]["pose"]],
+                )
+                self.assertNotIn("pose:old", submitted["resolved_prompt"])
+        self.assertEqual(store.list()["items"][0]["id"], rule["id"])
+
+    async def test_content_redraw_rule_exhaustion_raises_catalog_error_with_rule_id(self):
+        """拦住不了就必须报错点名规则 id,不能静默返回被禁组合。"""
+        store = CombinationRuleStore(Path(self.temp.name) / "redraw_exhausted.json")
+        rule_ids = []
+        # 三个候选姿势全部被禁 -> resolve_prompt 的重抽必然用尽,必须显式报错。
+        for pose_id in ("pose:old", "pose:new", "pose:other"):
+            rule = await store.create(
+                {
+                    "picks": {
+                        "character": {"id": "character:new", "label": "new"},
+                        "pose": {"id": pose_id, "label": pose_id},
+                    }
+                }
+            )
+            rule_ids.append(rule["id"])
+        manager = BatchManager(
+            FakeTemplates(),
+            self.history,
+            self.comfy,
+            RedrawCatalog(),
+            combination_rules=store,
+        )
+        fixed_character = [
+            {"id": "character:new", "title": "character:new", "prompt": "character:new"}
+        ]
+        regeneration = {
+            "mode": "content_redraw",
+            "redraw_sections": ["pose"],
+            "fixed_selection": {"character": fixed_character},
+            "original_selection": {
+                "character": fixed_character,
+                "pose": [{"id": "pose:new", "title": "pose:new", "prompt": "pose:new"}],
+            },
+        }
+        await manager.start(
+            self.redraw_settings(),
+            seeds={"sample_seed": 3, "prompt_seed": 1},
+            regeneration=regeneration,
+        )
+        result = await manager.wait()
+        self.assertEqual(result["status"], "error")
+        self.assertTrue(
+            any(rule_id in result["error"] for rule_id in rule_ids),
+            f"错误信息应点名规则 id,实际为: {result['error']}",
+        )
+        self.assertEqual(self.comfy.submissions, [])
+
+    async def test_replay_ignores_combination_rules_by_design(self):
+        """replay 是"复现原图":规则后来新增也必须能回放,不能因规则失败。"""
+        store = CombinationRuleStore(Path(self.temp.name) / "replay_rules.json")
+        await store.create(
+            {
+                "picks": {
+                    "character": {"id": "character:old", "label": "old"},
+                    "pose": {"id": "pose:old", "label": "old"},
+                }
+            }
+        )
+        manager = BatchManager(
+            FakeTemplates(),
+            self.history,
+            self.comfy,
+            RedrawCatalog(),
+            combination_rules=store,
+        )
+        regeneration = {
+            "mode": "replay",
+            "frozen_positive_prompt": "historical final prompt ",
+            "frozen_negative_prompt": "historical negative ",
+            "fixed_selection": {
+                "character": [{"id": "character:old", "title": "old", "prompt": "old"}],
+                "pose": [{"id": "pose:old", "title": "old", "prompt": "old"}],
+            },
+        }
+        await manager.start(
+            {**DEFAULT_SETTINGS, "count": 1},
+            seeds={"sample_seed": 1, "prompt_seed": 2},
+            regeneration=regeneration,
+        )
+        result = await manager.wait()
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(self.comfy.submissions[-1]["resolved_prompt"], "historical final prompt ")
+
+
+class ContentRedrawRealCatalogTests(unittest.IsolatedAsyncioTestCase):
+    """用真实 PromptCatalog 覆盖 content_redraw + 组合规则(替身可能掩盖语义差异)。"""
+
+    async def asyncSetUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        tools = root / "tools"
+        js = tools / "js"
+        js.mkdir(parents=True)
+        datasets = {
+            "character_data.js": [
+                {"name": "alpha", "copyright": "series", "gender": "1girl", "hair": "blue", "eye": "red", "post_count": 5},
+            ],
+            "clothing_data.js": [
+                {"id": "x", "name": "X", "name_zh": "X装", "tags": "x-tag", "categories": ["日常/休闲 (Casual & Daily)"], "traits": ["red"]},
+                {"id": "y", "name": "Y", "name_zh": "Y装", "tags": "y-tag", "categories": ["日常/休闲 (Casual & Daily)"], "traits": ["red"]},
+                {"id": "z", "name": "Z", "name_zh": "Z装", "tags": "z-tag", "categories": ["日常/休闲 (Casual & Daily)"], "traits": ["red"]},
+            ],
+            "pose_data.js": [
+                {"id": "stand", "name": "Standing", "name_zh": "站立", "tags": "standing", "categories": ["站立与动态 (Standing & Dynamic)"], "traits": ["standing"]},
+            ],
+            "background_data.js": [
+                {"id": "room", "name": "Room", "name_zh": "房间", "tags": "indoors", "categories": ["都市与日常 (Urban & Daily)"], "traits": ["indoor"]},
+            ],
+        }
+        for filename, values in datasets.items():
+            (js / filename).write_text(
+                f"const data = {json.dumps(values, ensure_ascii=False)};\n",
+                encoding="utf-8",
+            )
+        self.catalog = PromptCatalog(root, tools)
+        self.history = HistoryStore(root / "history.sqlite3")
+        self.comfy = FakeComfy()
+        self.rules_path = root / "combination_rules.json"
+
+    async def asyncTearDown(self):
+        await self.history.close()
+        self.temp.cleanup()
+
+    def _settings(self):
+        settings = copy.deepcopy(DEFAULT_SETTINGS)
+        settings.update(
+            {
+                "count": 1,
+                "random_character": False,
+                "fixed_character": "alpha, series",
+                "random_clothing": True,
+                "pools": {
+                    "character": {"mode": "include", "ids": [], "excluded_ids": []},
+                    "clothing": {
+                        "mode": "include",
+                        "ids": ["clothing:x", "clothing:y", "clothing:z"],
+                        "excluded_ids": [],
+                    },
+                    "pose": {"mode": "include", "ids": [], "excluded_ids": []},
+                    "background": {"mode": "include", "ids": [], "excluded_ids": []},
+                    "expression": {"mode": "include", "ids": [], "excluded_ids": []},
+                },
+            }
+        )
+        return settings
+
+    def _regeneration(self, fixed_character):
+        # original_selection 刻意用未被禁的 clothing:z(而非被禁的 clothing:x):
+        # 这样"抽到 clothing:x"本身就满足 _changed,不会被"必须发生改变"的
+        # 重试逻辑顺手排除,规则是否真的生效因此有区分力。
+        return {
+            "mode": "content_redraw",
+            "redraw_sections": ["clothing"],
+            "fixed_selection": {"character": fixed_character},
+            "original_selection": {
+                "character": fixed_character,
+                "clothing": [{"id": "clothing:z", "title": "Z", "prompt": "z-tag"}],
+            },
+        }
+
+    async def test_fixed_character_rule_blocks_clothing_under_real_catalog(self):
+        """固定角色 + 随机服装:规则必须真的把被禁服装换掉。"""
+        store = CombinationRuleStore(self.rules_path)
+        await store.create(
+            {
+                "picks": {
+                    "character": {"id": "character:alpha||series", "label": "alpha"},
+                    "clothing": {"id": "clothing:x", "label": "X"},
+                }
+            }
+        )
+        manager = BatchManager(
+            FakeTemplates(),
+            self.history,
+            self.comfy,
+            self.catalog,
+            combination_rules=store,
+        )
+        fixed_character = [
+            self.catalog.get("character:alpha||series"),
+        ]
+        for prompt_seed in (1, 2, 3, 4, 5, 6, 7, 8):
+            with self.subTest(prompt_seed=prompt_seed):
+                await manager.start(
+                    self._settings(),
+                    seeds={"sample_seed": 9, "prompt_seed": prompt_seed},
+                    regeneration=self._regeneration(fixed_character),
+                )
+                await manager.wait()
+                submitted = self.comfy.submissions[-1]
+                ids = [
+                    item["id"]
+                    for item in submitted["resolved_selection"]["clothing"]
+                ]
+                self.assertNotIn("clothing:x", ids)
+                self.assertNotIn("x-tag", submitted["resolved_prompt"])
+
+    async def test_exhausted_candidates_raise_error_naming_rule(self):
+        """所有候选都被规则禁掉时必须报错并点名规则 id,不能交出被禁组合。"""
+        store = CombinationRuleStore(self.rules_path)
+        rule_ids = []
+        for clothing_id in ("clothing:x", "clothing:y", "clothing:z"):
+            rule = await store.create(
+                {
+                    "picks": {
+                        "character": {"id": "character:alpha||series", "label": "alpha"},
+                        "clothing": {"id": clothing_id, "label": clothing_id},
+                    }
+                }
+            )
+            rule_ids.append(rule["id"])
+        manager = BatchManager(
+            FakeTemplates(),
+            self.history,
+            self.comfy,
+            self.catalog,
+            combination_rules=store,
+        )
+        fixed_character = [self.catalog.get("character:alpha||series")]
+        await manager.start(
+            self._settings(),
+            seeds={"sample_seed": 9, "prompt_seed": 1},
+            regeneration=self._regeneration(fixed_character),
+        )
+        result = await manager.wait()
+        self.assertEqual(result["status"], "error")
+        self.assertTrue(
+            any(rule_id in result["error"] for rule_id in rule_ids),
+            f"错误信息应点名规则 id,实际为: {result['error']}",
+        )
+        self.assertEqual(self.comfy.submissions, [])
 
 
 if __name__ == "__main__":

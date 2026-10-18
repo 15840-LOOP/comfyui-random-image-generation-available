@@ -179,6 +179,30 @@ class CombinationRuleStoreTests(unittest.IsolatedAsyncioTestCase):
                 {"picks": picks(character=("x", "垃圾id"), clothing=("clothing:b", "服装B"))}
             )
 
+    async def test_fixed_prompt_dimension_is_rejected(self):
+        """固定提示词维度的伪条目 id 是空字符串,规则对它永远不生效,必须拒绝。"""
+        with self.assertRaisesRegex(WorkflowError, "固定提示词维度不能用于组合规则"):
+            await self.store.create(
+                {"picks": picks(character=("", "固定角色"), clothing=("clothing:b", "服装B"))}
+            )
+        self.assertEqual(self.store.list()["count"], 0)
+
+    async def test_blank_id_after_strip_is_rejected(self):
+        """只有空白的 id 与空字符串等价,同样属于固定维度误传。"""
+        for blank in ("   ", "\t", "\n"):
+            with self.subTest(blank=repr(blank)):
+                with self.assertRaisesRegex(
+                    WorkflowError, "固定提示词维度不能用于组合规则"
+                ):
+                    await self.store.create(
+                        {
+                            "picks": {
+                                "character": {"id": blank, "label": "固定角色"},
+                                "clothing": {"id": "clothing:b", "label": "服装B"},
+                            }
+                        }
+                    )
+
     async def test_match_tolerates_non_mapping_selection(self):
         await self.store.create(
             {"picks": picks(character=("character:a", "A"), clothing=("clothing:b", "B"))}

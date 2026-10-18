@@ -147,7 +147,11 @@ class CombinationRuleStore:
                 raise WorkflowError(f"组合规则的 {section} 必须是对象")
             item_id = str(value.get("id") or "").strip()
             if not item_id:
-                raise WorkflowError(f"组合规则的 {section} 缺少 id")
+                # 固定提示词维度的伪条目 id 为空字符串:它不参与随机抽取,
+                # match() 永远不会命中。在这里拦住,避免创建一条永不生效的规则。
+                raise WorkflowError(
+                    f"固定提示词维度不能用于组合规则: {section} 不是随机抽取维度"
+                )
             if len(item_id) > MAX_ITEM_ID:
                 raise WorkflowError(f"组合规则的 {section} 条目 id 过长")
             # catalog 条目的 id 恒为 "<section>:..."(见 catalog._simple_key),
