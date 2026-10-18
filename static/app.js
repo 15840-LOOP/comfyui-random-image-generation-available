@@ -366,6 +366,15 @@ const ui = Object.fromEntries(
     "detailer_eyes",
     "themeToggle",
     "appError",
+    "toggleMonitor",
+    "monitorPanel",
+    "monitorImage",
+    "monitorPlaceholder",
+    "monitorBatch",
+    "monitorCurrent",
+    "monitorSample",
+    "monitorState",
+    "monitorQueue",
   ].map((id) => [id, document.getElementById(id)]),
 );
 
@@ -1413,11 +1422,80 @@ function renderBatch(batch, queue = currentQueue) {
   ui.startButton.textContent = active ? "加入队列" : "开始生成";
   ui.batchError.hidden = !batch?.error;
   ui.batchError.textContent = batch?.error || "";
+  renderMonitor(batch, queue);
   if (batch && !active && lastTerminalBatch !== `${batch.id}:${batch.status}:${completed}`) {
     lastTerminalBatch = `${batch.id}:${batch.status}:${completed}`;
     loadHistory(1);
   }
 }
+
+// ---------------------------------------------------------------------------
+// 生成监视区:底栏小三角手动展开,给实时预览与采样进度一个可读的空间。
+// ---------------------------------------------------------------------------
+let monitorOpen = false;
+let monitorQueueSignature = "";
+
+const MONITOR_STATE_LABELS = {
+  running: "正在生成",
+  stopping: "收尾中",
+  completed: "已完成",
+  stopped: "已停止",
+  error: "执行失败",
+};
+
+function toggleMonitor(open) {
+  monitorOpen = typeof open === "boolean" ? open : !monitorOpen;
+  ui.monitorPanel.hidden = !monitorOpen;
+  ui.toggleMonitor.setAttribute("aria-expanded", String(monitorOpen));
+  ui.toggleMonitor.title = monitorOpen ? "收起生成监视区" : "展开生成监视区";
+}
+
+function renderMonitor(batch, queue = currentQueue) {
+  if (!ui.monitorPanel) return;
+  const active = Boolean(batch && ["running", "stopping"].includes(batch.status));
+  // 测量带每 tick 只改 textContent:重建节点会让 1.2s 一次的轮询产生闪烁。
+  ui.monitorBatch.textContent = `${batch?.completed || 0} / ${batch?.total || 0}`;
+  ui.monitorCurrent.textContent = batch?.current ? `第 ${batch.current} 张` : "—";
+  const progress = active ? batch.progress : null;
+  ui.monitorSample.textContent =
+    progress && progress.max > 0 ? `${progress.value} / ${progress.max}` : "—";
+  ui.monitorState.textContent = batch
+    ? MONITOR_STATE_LABELS[batch.status] || batch.status
+    : "空闲";
+  // 队列只在内容真的变了才重建,否则每 tick 都 replaceChildren 会打断滚动与选中。
+  const signature = queue.map((entry) => `${entry.queue_id}:${entry.position}`).join("|");
+  if (signature !== monitorQueueSignature) {
+    monitorQueueSignature = signature;
+    ui.monitorQueue.hidden = queue.length === 0;
+    ui.monitorQueue.replaceChildren(
+      ...queue.map((entry) => {
+        const row = document.createElement("div");
+        row.textContent = `${entry.position}. ${entry.count} 张 · ${entry.model_name}`;
+        return row;
+      }),
+    );
+  } else if (queue.length === 0) {
+    ui.monitorQueue.hidden = true;
+  }
+  if (active && batch.preview_id) {
+    const next = `/api/batches/current/preview?v=${batch.preview_id}`;
+    // 同一个 preview_id 不重复赋值 src,避免浏览器重复解码同一帧。
+    if (ui.monitorImage.dataset.previewId !== String(batch.preview_id)) {
+      ui.monitorImage.dataset.previewId = String(batch.preview_id);
+      ui.monitorImage.src = next;
+    }
+    ui.monitorImage.hidden = false;
+    ui.monitorPlaceholder.hidden = true;
+  } else if (!active) {
+    ui.monitorImage.hidden = true;
+    ui.monitorPlaceholder.hidden = false;
+    if (ui.monitorImage.dataset.previewId) {
+      delete ui.monitorImage.dataset.previewId;
+      ui.monitorImage.removeAttribute("src");
+    }
+  }
+}
+
 async function refreshConnection() {
   if (document.hidden) return;
   try {
@@ -4856,6 +4934,10 @@ ui.clearRules.addEventListener("click", async () => {
   } catch (error) {
     toast(error.message);
   }
+});
+ui.toggleMonitor.addEventListener("click", () => toggleMonitor());
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && monitorOpen) toggleMonitor(false);
 });
 ui.restoreSettings.addEventListener("click", () => {
   if (!selectedRecord) return;

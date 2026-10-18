@@ -178,7 +178,10 @@
   </main>
 
   <div class="command-deck glass" role="group" aria-label="生成控制">
-    <img id="livePreview" class="live-preview" alt="实时预览" hidden>
+    <button id="toggleMonitor" class="monitor-toggle" type="button" aria-expanded="false" aria-controls="monitorPanel" title="展开生成监视区">
+      <img id="livePreview" class="live-preview" alt="实时预览" hidden>
+      <span class="monitor-caret" aria-hidden="true">▴</span>
+    </button>
     <label class="quantity-field"><span>批次数量</span><input id="count" form="settingsForm" type="number" min="1" max="1000" step="1" required></label>
     <div class="batch-summary" aria-live="polite">
       <div class="batch-summary-copy"><span id="batchState">等待任务</span><small id="sampleProgress" hidden></small><button id="queueBadge" class="queue-badge" type="button" hidden aria-haspopup="true" aria-expanded="false">队列 0</button><strong id="progressCount">0 / 0</strong></div>
@@ -191,6 +194,20 @@
       <button id="startButton" class="button primary" type="submit" form="settingsForm">开始生成</button>
     </div>
   </div>
+
+  <section id="monitorPanel" class="monitor-panel" aria-label="生成监视区" hidden>
+    <div class="monitor-stage">
+      <img id="monitorImage" alt="实时采样预览" hidden>
+      <div id="monitorPlaceholder" class="monitor-placeholder"><span>等待采样</span><small>生成开始后这里显示实时预览</small></div>
+    </div>
+    <div class="monitor-meters">
+      <div class="meter"><span>批次</span><strong id="monitorBatch">0 / 0</strong></div>
+      <div class="meter"><span>当前张</span><strong id="monitorCurrent">—</strong></div>
+      <div class="meter"><span>采样</span><strong id="monitorSample">—</strong></div>
+      <div class="meter"><span>状态</span><strong id="monitorState">空闲</strong></div>
+    </div>
+    <div id="monitorQueue" class="monitor-queue" hidden></div>
+  </section>
 
   <div id="queuePanel" class="queue-panel glass" hidden></div>
 
