@@ -197,7 +197,7 @@ class CombinationRuleStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.list()["count"], 1)
 
     async def test_match_fixed_pick_by_text(self):
-        """固定伪条目(空 id + fixed)只靠 text 命中,随机条目 id 形态不受影响。"""
+        """固定伪条目按主身份命中:title 是身份、subtitle 是精确化信息。"""
         await self.store.create(
             {
                 "picks": {
@@ -209,6 +209,8 @@ class CombinationRuleStoreTests(unittest.IsolatedAsyncioTestCase):
         fixed_character = {
             "id": "",
             "section": "character",
+            "title": "alpha",
+            "subtitle": "series",
             "prompt": "alpha, series",
             "fixed": True,
         }
@@ -216,11 +218,22 @@ class CombinationRuleStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(
             self.store.match({"character": [fixed_character], "clothing": [clothing]})
         )
-        # 固定文本不同 -> 不命中
+        # 主身份不同 -> 不命中
         self.assertIsNone(
             self.store.match(
                 {
-                    "character": [{**fixed_character, "prompt": "beta, series"}],
+                    "character": [{**fixed_character, "title": "beta", "prompt": "beta, series"}],
+                    "clothing": [clothing],
+                }
+            )
+        )
+        # 系列不同 -> 不命中
+        self.assertIsNone(
+            self.store.match(
+                {
+                    "character": [
+                        {**fixed_character, "subtitle": "other", "prompt": "alpha, other"}
+                    ],
                     "clothing": [clothing],
                 }
             )
@@ -252,6 +265,8 @@ class CombinationRuleStoreTests(unittest.IsolatedAsyncioTestCase):
                         {
                             "id": "",
                             "section": "character",
+                            "title": "  alpha  ",
+                            "subtitle": " series ",
                             "prompt": "  alpha, series  ",
                             "fixed": True,
                         }
@@ -311,6 +326,114 @@ class CombinationRuleStoreTests(unittest.IsolatedAsyncioTestCase):
                     "character": [
                         {"id": "character:beta||series", "title": "beta", "prompt": "beta"}
                     ],
+                    "clothing": [{"id": "clothing:b"}],
+                }
+            )
+        )
+
+    async def test_generic_tag_does_not_hit_entries(self):
+        """判据 1:通用标签(只出现在 prompt/tags 里)不得命中任何条目。
+
+        否则 text="1girl" 会把所有女性角色条目判为命中,规则退化成"整维全禁"。
+        """
+        await self.store.create(
+            {
+                "picks": {
+                    "character": {"text": "1girl", "label": "通用标签"},
+                    "clothing": {"id": "clothing:b", "label": "服装B"},
+                }
+            }
+        )
+        entry = {
+            "id": "character:alpha||series",
+            "section": "character",
+            "title": "alpha",
+            "subtitle": "series",
+            "prompt": "alpha, 1girl, long hair",
+            "tags": ["1girl", "long hair"],
+        }
+        self.assertIsNone(
+            self.store.match({"character": [entry], "clothing": [{"id": "clothing:b"}]})
+        )
+
+    async def test_identity_tag_hits_matching_title_only(self):
+        """判据 2:text="alpha" 命中 title=alpha,不命中 title=beta。"""
+        await self.store.create(
+            {
+                "picks": {
+                    "character": {"text": "alpha", "label": "alpha"},
+                    "clothing": {"id": "clothing:b", "label": "服装B"},
+                }
+            }
+        )
+        def entry(title):
+            return {
+                "id": f"character:{title}||series",
+                "section": "character",
+                "title": title,
+                "subtitle": "series",
+                "prompt": f"{title}, 1girl",
+                "tags": ["1girl"],
+            }
+        self.assertIsNotNone(
+            self.store.match(
+                {"character": [entry("alpha")], "clothing": [{"id": "clothing:b"}]}
+            )
+        )
+        self.assertIsNone(
+            self.store.match(
+                {"character": [entry("beta")], "clothing": [{"id": "clothing:b"}]}
+            )
+        )
+
+    async def test_identity_plus_series_is_precise(self):
+        """判据 3:"alpha, series" 命中 alpha+series,不命中 alpha+其它系列。"""
+        await self.store.create(
+            {
+                "picks": {
+                    "character": {"text": "alpha, series", "label": "alpha"},
+                    "clothing": {"id": "clothing:b", "label": "服装B"},
+                }
+            }
+        )
+        def entry(series):
+            return {
+                "id": f"character:alpha||{series}",
+                "section": "character",
+                "title": "alpha",
+                "subtitle": series,
+                "prompt": "alpha, 1girl",
+                "tags": ["1girl"],
+            }
+        self.assertIsNotNone(
+            self.store.match(
+                {"character": [entry("series")], "clothing": [{"id": "clothing:b"}]}
+            )
+        )
+        self.assertIsNone(
+            self.store.match(
+                {"character": [entry("other")], "clothing": [{"id": "clothing:b"}]}
+            )
+        )
+
+    async def test_random_pick_still_matches_by_id_only(self):
+        """判据 4:随机维度按 id 匹配完全不变(不受 title/text 逻辑影响)。"""
+        await self.store.create(
+            {"picks": picks(character=("character:a", "A"), clothing=("clothing:b", "B"))}
+        )
+        self.assertIsNotNone(
+            self.store.match(
+                {
+                    "character": [{"id": "character:a", "title": "完全不同"}],
+                    "clothing": [{"id": "clothing:b"}],
+                }
+            )
+        )
+        # id 不同即便 title 相同也不命中
+        self.assertIsNone(
+            self.store.match(
+                {
+                    "character": [{"id": "character:z", "title": "A"}],
                     "clothing": [{"id": "clothing:b"}],
                 }
             )

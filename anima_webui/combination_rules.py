@@ -63,6 +63,16 @@ def _item_tags(item: dict[str, Any]) -> frozenset[str]:
     return frozenset(parts)
 
 
+def _primary_tags(item: dict[str, Any]) -> frozenset[str]:
+    """条目的"主身份"标签:title(角色名/条目名)。
+
+    通用标签(1girl、blue eyes、long hair)只会出现在 prompt/tags 里,不会进
+    title,所以用 title 限定"规则必须指向某个具体身份",避免 text="1girl"
+    把整个维度全禁掉。系列等精确化信息放在 residual 里用包含关系校验。
+    """
+    return _text_tags(item.get("title"))
+
+
 class CombinationRuleStore:
     """组合规则持久化。写盘顺序:先落盘,再改内存(失败时状态不分叉)。"""
 
@@ -175,12 +185,21 @@ class CombinationRuleStore:
             if item.get("fixed"):
                 return False
             return item.get("id") == pick["id"]
-        # 固定维度:按 tag 集合包含关系比对。content_redraw 里固定维度来自历史
-        # 快照,是真实 catalog 条目(触发词在 title/prompt、系列在 subtitle);
-        # 普通批次里来自 settings 的 fixed_* 原文(如 "alpha, series")。两者字段
-        # 分布不同,汇总全部描述字段后判断"规则标签是否都被该维度包含",才能一致。
+        # 固定维度:必须以"主身份"命中,不能只靠通用标签蒙中。
+        # content_redraw 里固定维度来自历史快照(真实 catalog 条目:title 是角色名、
+        # subtitle 是系列、prompt 是 trigger+tags);普通批次里来自 settings 的
+        # fixed_* 原文(如 "alpha, series")。先用 title 校验身份,再用剩余 tag 做
+        # 精确化(系列/分类),这样 text="1girl" 这类通用标签不会把整维全禁。
         wanted = _text_tags(text)
-        return bool(wanted) and wanted.issubset(_item_tags(item))
+        if not wanted:
+            return False
+        primary = _primary_tags(item)
+        if not (wanted & primary):
+            return False
+        residual = wanted - primary
+        if not residual:
+            return True
+        return residual.issubset(_item_tags(item))
 
     @staticmethod
     def _section_items(value: Any) -> list[Any]:

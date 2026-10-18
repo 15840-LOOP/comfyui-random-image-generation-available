@@ -27,6 +27,11 @@ REGENERATION_MODES = {"replay", "prompt_variant", "content_redraw", "settings_re
 PROMPT_SECTIONS = ("character", "clothing", "pose", "background", "expression")
 
 
+def _squash(value: Any) -> str:
+    """折叠空白并去首尾,用于把 fixed_* 文本拆成稳定的 tag。"""
+    return " ".join(str(value or "").split())
+
+
 def validate_seeds(value: Any) -> dict[str, int] | None:
     """校验复现用的固定种子。None 表示每张图随机(默认行为)。"""
     if value is None:
@@ -97,6 +102,16 @@ class BatchManager:
         固定维度不参与随机抽取,但用户完全可能"固定角色 + 随机服装"后
         想在图上禁用某个搭配。伪条目结构与 Task 4 写入 selected 的一致
         (id 为空、fixed 标记),这样固定维度在所有抽取路径上规则行为一致。
+
+        形状刻意对齐 catalog 条目:title 放身份(第一个 tag,通常就是角色名/
+        条目名),subtitle 放系列等后续 tag,prompt 保留完整原文。这样固定
+        维度在"普通批次的伪条目"与"content_redraw 的历史真实条目"上
+        走同一套主身份判据,不会出现一边命中一边不命中。
+
+        已知差异:这里直接用 settings["fixed_<section>"] 原文,而 workflow.py
+        提交时对 character 走 get_resolved_tags()(character_detail="trigger"
+        时只保留触发词)。即 pinned 文本可能比实际提交的更长,匹配只会更宽松,
+        不会漏禁;若将来要求逐字一致,需在此复用 workflow 的拼装口径。
         """
         pinned: dict[str, list[dict[str, Any]]] = {}
         for section in PROMPT_SECTIONS:
@@ -105,13 +120,21 @@ class BatchManager:
             fixed_text = str(settings.get(f"fixed_{section}") or "").strip()
             if not fixed_text:
                 continue
+            tags = [
+                tag
+                for tag in (
+                    _squash(tag) for tag in fixed_text.replace("，", ",").split(",")
+                )
+                if tag
+            ]
             pinned[section] = [
                 {
                     "id": "",
                     "section": section,
-                    "title": fixed_text,
+                    "title": tags[0] if tags else fixed_text,
+                    "subtitle": ", ".join(tags[1:]),
                     "prompt": fixed_text,
-                    "tags": [],
+                    "tags": tags[1:],
                     "fixed": True,
                 }
             ]
@@ -391,6 +414,8 @@ class BatchManager:
         seeds: dict[str, int] | None = None,
         regeneration: dict[str, Any] | None = None,
     ) -> None:
+        # settings 在批次内不变,固定维度的 pinned 结构只需算一次。
+        fixed_pinned = self._fixed_pinned(settings)
         try:
             for sequence in range(1, settings["count"] + 1):
                 if self.stop_requested:
@@ -410,7 +435,7 @@ class BatchManager:
                     self._resolve_catalog_prompt(
                         settings,
                         prompt_seed,
-                        pinned=self._fixed_pinned(settings),
+                        pinned=fixed_pinned,
                     ) if self.catalog else {
                         "composer_prompt": "",
                         "full_prompt": "",

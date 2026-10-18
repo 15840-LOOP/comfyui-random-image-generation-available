@@ -1101,8 +1101,71 @@ class ContentRedrawRealCatalogTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.comfy.submissions, [])
 
+    async def test_generic_tag_rule_does_not_kill_the_whole_section(self):
+        """回归 Critical:规则 text 只用通用标签(1girl)时不得把整维全禁。
+
+        通用标签只出现在 catalog 条目的 prompt/tags 里、不进 title,因此不该
+        命中任何固定维度条目。若命中,规则会退化成"该维度全禁" -> 疯狂换抽
+        直至 CatalogError。这里直接统计 match() 的命中次数,避免只看最终
+        产出被 AND 语义掩盖(服装维度不命中时结果一样)。
+        """
+        store = CombinationRuleStore(self.rules_path / "generic_tag_rules.json")
+        await store.create(
+            {
+                "picks": {
+                    "character": {"text": "1girl", "label": "通用标签"},
+                    "clothing": {"id": "clothing:x", "label": "X"},
+                }
+            }
+        )
+        # 直接喂真实 catalog 条目:通用标签在 prompt/tags 里,不应被当成身份。
+        catalog_entry = self.catalog.get("character:alpha||series")
+        self.assertIsNone(
+            store.match(
+                {
+                    "character": [catalog_entry],
+                    "clothing": [{"id": "clothing:x"}],
+                }
+            )
+        )
+        # 固定伪条目同样不该被通用标签命中。
+        pseudo = {
+            "id": "",
+            "section": "character",
+            "title": "alpha",
+            "subtitle": "series",
+            "prompt": "alpha, series, 1girl",
+            "fixed": True,
+        }
+        self.assertIsNone(
+            store.match(
+                {"character": [pseudo], "clothing": [{"id": "clothing:x"}]}
+            )
+        )
+        # 端到端:批次能正常跑完,不出现候选耗尽。
+        manager = BatchManager(
+            FakeTemplates(),
+            self.history,
+            self.comfy,
+            self.catalog,
+            combination_rules=store,
+        )
+        for prompt_seed in (1, 2, 3, 4):
+            with self.subTest(prompt_seed=prompt_seed):
+                await manager.start(
+                    self._settings(),
+                    seeds={"sample_seed": 9, "prompt_seed": prompt_seed},
+                )
+                result = await manager.wait()
+                self.assertEqual(result["status"], "completed")
+                self.assertEqual(result["error"], "")
+
     async def test_same_rule_blocks_consistently_across_all_paths(self):
-        """同一份规则在普通批次 / content_redraw / settings_reroll 上行为必须一致。"""
+        """同一份规则在普通批次 / content_redraw / settings_reroll 上行为必须一致。
+
+        断言"规则确实命中并且生效":每条路径都必须避开被禁服装,且 blocked
+        回调真的被调用过(否则固定分支失效时会假通过)。
+        """
         store = CombinationRuleStore(self.rules_path / "consistency_rules.json")
         await store.create(
             {
@@ -1113,7 +1176,7 @@ class ContentRedrawRealCatalogTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         fixed_character = [self.catalog.get("character:alpha||series")]
-        results = {}
+        seen = {}
         for label, kwargs in (
             ("plain", {}),
             ("content_redraw", {"regeneration": self._regeneration(fixed_character)}),
@@ -1122,6 +1185,16 @@ class ContentRedrawRealCatalogTests(unittest.IsolatedAsyncioTestCase):
                 {"regeneration": {"mode": "settings_reroll"}},
             ),
         ):
+            # 包一层记录 blocked 调用:规则分支若失效,调用数会变成 0。
+            calls = []
+            original_match = store.match
+
+            def recording_match(selection, _calls=calls, _orig=original_match):
+                rule_id = _orig(selection)
+                _calls.append(rule_id)
+                return rule_id
+
+            store.match = recording_match
             manager = BatchManager(
                 FakeTemplates(),
                 self.history,
@@ -1129,26 +1202,34 @@ class ContentRedrawRealCatalogTests(unittest.IsolatedAsyncioTestCase):
                 self.catalog,
                 combination_rules=store,
             )
-            blocked_any = []
-            for prompt_seed in (1, 2, 3, 4, 5):
-                await manager.start(
-                    self._settings(),
-                    seeds={"sample_seed": 9, "prompt_seed": prompt_seed},
-                    **kwargs,
-                )
-                await manager.wait()
-                submitted = self.comfy.submissions[-1]
-                ids = [
-                    item["id"]
-                    for item in submitted["resolved_selection"].get("clothing", [])
-                ]
-                blocked_any.append("clothing:x" in ids)
-            results[label] = any(blocked_any)
-        self.assertEqual(
-            results,
-            {"plain": False, "content_redraw": False, "settings_reroll": False},
-            f"被禁服装在以下路径出现: {results}",
-        )
+            picked_x = False
+            try:
+                for prompt_seed in (1, 2, 3, 4, 5):
+                    await manager.start(
+                        self._settings(),
+                        seeds={"sample_seed": 9, "prompt_seed": prompt_seed},
+                        **kwargs,
+                    )
+                    result = await manager.wait()
+                    self.assertEqual(result["status"], "completed")
+                    submitted = self.comfy.submissions[-1]
+                    ids = [
+                        item["id"]
+                        for item in submitted["resolved_selection"].get("clothing", [])
+                    ]
+                    picked_x = picked_x or ("clothing:x" in ids)
+            finally:
+                store.match = original_match
+            self.assertFalse(picked_x, f"{label} 路径下被禁服装出现在提交载荷里")
+            seen[label] = {
+                "blocked_called": len(calls),
+                "rule_hits": sum(1 for rule_id in calls if rule_id),
+            }
+        for label, stats in seen.items():
+            with self.subTest(path=label):
+                # blocked 必须被调用(固定维度参与校验),且确实命中了这条规则。
+                self.assertGreater(stats["blocked_called"], 0, f"{label} 未调用规则校验")
+                self.assertGreater(stats["rule_hits"], 0, f"{label} 规则从未命中")
 
 
 if __name__ == "__main__":
