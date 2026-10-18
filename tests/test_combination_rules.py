@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 APP_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP_DIR))
@@ -15,7 +16,7 @@ from anima_webui.workflow import WorkflowError  # noqa: E402
 
 
 def picks(**kwargs):
-    """构造 picks 载荷：picks(character=("id1", "标签1"), clothing=("id2", "标签2"))"""
+    """构造 picks 载荷：picks(character=("character:id1", "标签1"))"""
     return {
         section: {"id": value[0], "label": value[1]}
         for section, value in kwargs.items()
@@ -151,15 +152,15 @@ class CombinationRuleStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["version"], 1)
 
     async def test_custom_items_are_allowed(self):
-        """自定义词条 id 是 custom:N(不带维度前缀),不能被前缀校验误杀。"""
+        """自定义词条 id 是 custom:<uuid4().hex>(不带维度前缀),不能被格式校验误杀。"""
         item = await self.store.create(
-            {"picks": picks(character=("custom:c01", "自定义角色"), clothing=("clothing:b", "服装B"))}
+            {"picks": picks(character=("custom:" + "a" * 32, "自定义角色"), clothing=("clothing:b", "服装B"))}
         )
-        self.assertEqual(item["picks"]["character"]["id"], "custom:c01")
+        self.assertEqual(item["picks"]["character"]["id"], "custom:" + "a" * 32)
         self.assertIsNotNone(
             self.store.match(
                 {
-                    "character": [{"id": "custom:c01"}],
+                    "character": [{"id": "custom:" + "a" * 32}],
                     "clothing": [{"id": "clothing:b"}],
                 }
             )
@@ -170,6 +171,59 @@ class CombinationRuleStoreTests(unittest.IsolatedAsyncioTestCase):
             await self.store.create(
                 {"picks": picks(character=("clothing:b", "服装B"), clothing=("clothing:b", "服装B"))}
             )
+
+    async def test_bare_id_without_prefix_is_rejected(self):
+        """无前缀 id 永远命中不了 catalog 条目,必须在入口拒绝而不是静默失效。"""
+        with self.assertRaises(WorkflowError):
+            await self.store.create(
+                {"picks": picks(character=("x", "垃圾id"), clothing=("clothing:b", "服装B"))}
+            )
+
+    async def test_match_tolerates_non_mapping_selection(self):
+        await self.store.create(
+            {"picks": picks(character=("character:a", "A"), clothing=("clothing:b", "B"))}
+        )
+        self.assertIsNone(self.store.match(None))
+        self.assertIsNone(self.store.match([]))
+        self.assertIsNone(self.store.match("character:a"))
+
+    async def test_match_tolerates_non_list_section(self):
+        await self.store.create(
+            {"picks": picks(character=("character:a", "A"), clothing=("clothing:b", "B"))}
+        )
+        self.assertIsNone(self.store.match({"character": 5, "clothing": "clothing:b"}))
+        self.assertIsNotNone(
+            self.store.match({"character": [{"id": "character:a"}], "clothing": [{"id": "clothing:b"}]})
+        )
+
+    async def test_create_failure_does_not_mutate_memory(self):
+        """_write_text 失败时 create 必须抛错且内存状态不变(本模块头部不变量)。"""
+        with patch.object(self.store, "_write_text", side_effect=OSError("磁盘已满")):
+            with self.assertRaises(OSError):
+                await self.store.create(
+                    {"picks": picks(character=("character:a", "A"), clothing=("clothing:b", "B"))}
+                )
+        self.assertEqual(self.store.list()["count"], 0)
+        self.assertFalse(self.path.exists())
+
+    async def test_delete_failure_keeps_rule(self):
+        item = await self.store.create(
+            {"picks": picks(character=("character:a", "A"), clothing=("clothing:b", "B"))}
+        )
+        with patch.object(self.store, "_write_text", side_effect=OSError("磁盘已满")):
+            with self.assertRaises(OSError):
+                await self.store.delete(item["id"])
+        self.assertEqual(self.store.list()["count"], 1)
+        self.assertEqual(self.store.list()["items"][0]["id"], item["id"])
+
+    async def test_clear_failure_keeps_rules(self):
+        await self.store.create(
+            {"picks": picks(character=("character:a", "A"), clothing=("clothing:b", "B"))}
+        )
+        with patch.object(self.store, "_write_text", side_effect=OSError("磁盘已满")):
+            with self.assertRaises(OSError):
+                await self.store.clear()
+        self.assertEqual(self.store.list()["count"], 1)
 
     async def test_clear_persists_empty_file(self):
         await self.store.create(

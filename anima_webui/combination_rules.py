@@ -101,17 +101,26 @@ class CombinationRuleStore:
 
     def match(self, selection: dict[str, list[dict[str, Any]]]) -> str | None:
         """返回命中的规则 id。规则内所有维度都必须命中本次抽取结果。"""
+        # 该函数会在 server.py 的 except WorkflowError 之外被调用,
+        # 任何非预期入参都不能变成 500:非法入参一律视为"未命中"。
+        if not isinstance(selection, dict):
+            return None
         for rule in self.rules:
             picks = rule["picks"]
             if all(
                 any(
                     isinstance(item, dict) and item.get("id") == pick["id"]
-                    for item in selection.get(section) or []
+                    for item in self._section_items(selection.get(section))
                 )
                 for section, pick in picks.items()
             ):
                 return rule["id"]
         return None
+
+    @staticmethod
+    def _section_items(value: Any) -> list[Any]:
+        """把抽取结果里的某一维度安全地读成列表;非 list 一律当作空。"""
+        return value if isinstance(value, list) else []
 
     @staticmethod
     def _same_picks(left: dict[str, Any], right: dict[str, Any]) -> bool:
@@ -141,15 +150,14 @@ class CombinationRuleStore:
                 raise WorkflowError(f"组合规则的 {section} 缺少 id")
             if len(item_id) > MAX_ITEM_ID:
                 raise WorkflowError(f"组合规则的 {section} 条目 id 过长")
-            # 只拦"明显属于另一个维度"的 id(如把 clothing:xx 填进 character),
-            # 不要求前缀严格等于维度名:自定义词条统一是 custom:N(维度体现在
-            # section 字段里),前端也可能回传不带完整前缀的短 id,过严会把
-            # 合法搭配误判为非法。
-            if any(
-                other != section and item_id.startswith(f"{other}:")
-                for other in SECTIONS
+            # catalog 条目的 id 恒为 "<section>:..."(见 catalog._simple_key),
+            # 自定义词条恒为 "custom:<uuid4().hex>"(见 custom_prompts.py)。
+            # 两者都不是的 id 永远不可能命中,match() 会静默失效,所以在入口拦住;
+            # 这也自然拒绝了把 clothing:xx 填进 character 这类跨维度错填。
+            if not (
+                item_id.startswith(f"{section}:") or item_id.startswith("custom:")
             ):
-                raise WorkflowError(f"组合规则的 {section} 条目 id 与维度不匹配")
+                raise WorkflowError(f"组合规则的 {section} 条目 id 格式无效")
             label = str(value.get("label") or "").strip() or item_id.split(":", 1)[-1]
             if len(label) > MAX_LABEL:
                 raise WorkflowError("组合规则标签过长")
