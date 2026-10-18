@@ -110,6 +110,29 @@ def split_prompt(value: Any) -> list[str]:
     ]
 
 
+def fixed_selection_item(section: str, fixed_text: str) -> dict[str, Any]:
+    """固定提示词维度的伪条目,用于让详情弹窗/组合规则看到"这一维用了什么"。
+
+    固定维度不参与随机抽取,因此没有 catalog id;这里构造一条形状对齐
+    catalog 条目的记录写进 selected。唯一事实来源,runner._fixed_pinned()
+    与 resolve_prompt 都用它,避免两处形状漂移导致组合规则匹配不一致。
+
+    title 放完整原文而非第一个 tag:用户写的 tag 顺序不可控
+    (如 "1girl, alpha"),固定维度的身份判据是完整 tag 集
+    (见 CombinationRuleStore._pick_hit),不能假设身份在首位。
+    """
+    tags = [" ".join(tag.split()) for tag in split_prompt(fixed_text)]
+    return {
+        "id": "",
+        "section": section,
+        "title": fixed_text,
+        "subtitle": "",
+        "prompt": fixed_text,
+        "tags": [tag for tag in tags if tag],
+        "fixed": True,
+    }
+
+
 def _read_js_array(path: Path) -> list[dict[str, Any]]:
     content = path.read_text(encoding="utf-8")
     start = content.find("[")
@@ -569,8 +592,13 @@ class PromptCatalog:
         last_rule = ""
         for section in SECTIONS:
             if not settings.get(f"random_{section}"):
+                # 固定维度不参与随机抽取,但仍要把"实际用了什么词"写进 selected,
+                # 否则详情弹窗的 ACTUAL DRAW 五维全空,用户无法核对这一张图。
+                fixed_text = str(settings.get(f"fixed_{section}") or "").strip()
+                if fixed_text:
+                    selected[section] = [fixed_selection_item(section, fixed_text)]
                 if section == "expression":
-                    for part in split_prompt(settings.get("fixed_expression")):
+                    for part in split_prompt(fixed_text):
                         key = normalize_text(part)
                         if key and key not in seen:
                             seen.add(key)
@@ -634,7 +662,11 @@ class PromptCatalog:
             section_items = []
             for entry in entries:
                 pub = self.public_item(entry)
-                if section == "character":
+                if entry.get("fixed"):
+                    # 固定词伪条目:prompt 就是用户原文,不做 character_detail
+                    # 裁剪(那套逻辑针对 catalog 条目的 trigger/trigger_tags)。
+                    pub["fixed"] = True
+                elif section == "character":
                     # 依据当前 character_detail 裁剪实际 prompt:
                     # "trigger" 仅保留纯触发词(角色名 + 作品来源),
                     # "trigger_tags" 保留完整外貌与服装标签。

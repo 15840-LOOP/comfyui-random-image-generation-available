@@ -1006,6 +1006,13 @@ def render_workflows(
             for item in resolved_selection[section_name]:
                 if not item:
                     continue
+                if item.get("fixed"):
+                    # 固定维度伪条目(见 catalog.fixed_selection_item)只用于把
+                    # "这一维用了什么词"带进详情弹窗;提交时的提示词由
+                    # 下面的三元表达式直接取 settings["fixed_*"],不经过这里。
+                    # 跳过是双保险:万一将来分流逻辑被改动,也不会把固定词
+                    # 重复注入一次。
+                    continue
                 if section_name == "character" and settings.get("character_detail") == "trigger":
                     # 防御性适配:仅触发词模式下优先使用纯触发词,
                     # 避免历史记录中残留的默认服装/外观标签被注入。

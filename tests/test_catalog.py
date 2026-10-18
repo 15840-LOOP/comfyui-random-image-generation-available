@@ -11,6 +11,7 @@ sys.path.insert(0, str(APP_DIR))
 
 from anima_webui.catalog import SECTIONS, CatalogError, PromptCatalog, compose_people_tags  # noqa: E402
 from anima_webui.custom_prompts import MAX_GROUPS_PER_SECTION, CustomPromptStore  # noqa: E402
+from anima_webui.runner import BatchManager  # noqa: E402
 from anima_webui.workflow import DEFAULT_SETTINGS, validate_settings  # noqa: E402
 
 
@@ -220,7 +221,11 @@ class CatalogTests(unittest.IsolatedAsyncioTestCase):
             "fixed_expression": "gentle smile, relaxed expression",
         }), 45)
         self.assertIn("gentle smile, relaxed expression", fixed["full_prompt"])
-        self.assertEqual(fixed["selected"]["expression"], [])
+        # 固定维度也要写进 selected,否则详情弹窗的 ACTUAL DRAW 是空的。
+        fixed_items = fixed["selected"]["expression"]
+        self.assertEqual(len(fixed_items), 1)
+        self.assertTrue(fixed_items[0]["fixed"])
+        self.assertEqual(fixed_items[0]["prompt"], "gentle smile, relaxed expression")
 
     def test_reload_with_legacy_item_id_backs_up_and_starts_empty(self):
         # 回归:不带 custom: 前缀的 id 能通过 _normalize,却在 try 块之外的
@@ -574,6 +579,99 @@ class CombinationBlockingTests(unittest.TestCase):
         self.assertEqual(
             set(resolved["selected"]), set(SECTIONS)
         )
+
+
+class FixedPromptSelectionTests(unittest.TestCase):
+    """固定词模式也要把伪条目写进 selected,否则详情弹窗五维全空。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.catalog = build_catalog(Path(self.temp.name))
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_fixed_section_populates_selected(self):
+        settings = validate_settings(
+            {
+                "count": 1,
+                "random_clothing": False,
+                "fixed_clothing": "red coat, long sleeves",
+            }
+        )
+        resolved = self.catalog.resolve_prompt(settings, 42)
+        clothes = resolved["selected"]["clothing"]
+        self.assertEqual(len(clothes), 1)
+        self.assertEqual(clothes[0]["prompt"], "red coat, long sleeves")
+        self.assertEqual(clothes[0]["title"], "red coat, long sleeves")
+        self.assertTrue(clothes[0]["fixed"])
+
+    def test_fixed_pseudo_item_is_isomorphic_with_runner_pinned(self):
+        """伪条目必须与 runner._fixed_pinned() 同构,否则组合规则匹配会诡异。"""
+        settings = validate_settings(
+            {"count": 1, "random_background": False, "fixed_background": "forest, outdoors"}
+        )
+        item = self.catalog.resolve_prompt(settings, 42)["selected"]["background"][0]
+        pinned = BatchManager._fixed_pinned(settings)["background"][0]
+        # selected 里的条目还会经过 public_item() 投影给前端,因此比 pinned 多出
+        # 一批展示字段(可能为 None);但规则匹配读取的字段必须逐个相等。
+        for key in ("id", "section", "title", "subtitle", "prompt", "tags", "fixed"):
+            self.assertIn(key, item, f"伪条目缺少 {key}")
+            self.assertEqual(item[key], pinned[key], f"{key} 与 _fixed_pinned 不一致")
+        self.assertEqual(set(pinned), set(item) & set(pinned))
+
+    def test_random_section_has_no_fixed_flag(self):
+        settings = validate_settings(
+            {"count": 1, "random_clothing": True,
+             "pools": {"clothing": {"mode": "all", "ids": [], "excluded_ids": []}}}
+        )
+        resolved = self.catalog.resolve_prompt(settings, 42)
+        self.assertTrue(resolved["selected"]["clothing"])
+        for item in resolved["selected"]["clothing"]:
+            self.assertFalse(item.get("fixed"))
+
+    def test_empty_fixed_text_leaves_section_empty(self):
+        settings = validate_settings({"count": 1, "random_clothing": False, "fixed_clothing": ""})
+        resolved = self.catalog.resolve_prompt(settings, 42)
+        self.assertEqual(resolved["selected"]["clothing"], [])
+
+    def test_fixed_selection_does_not_change_prompt_text(self):
+        """回归:写入 selected 不得改变最终正向提示词内容。
+
+        clothing 属于"只走 full_prompt"的维度(workflow 提交时直接取
+        settings['fixed_clothing']),因此 composer_prompt 必须逐字不变;
+        full_prompt 只允许多出固定词本身,不允许改动其它 tag 或顺序。
+        """
+        base = validate_settings({"count": 1, "random_clothing": False, "fixed_clothing": ""})
+        with_fixed = validate_settings(
+            {"count": 1, "random_clothing": False, "fixed_clothing": "red coat"}
+        )
+        base_result = self.catalog.resolve_prompt(base, 5)
+        fixed_result = self.catalog.resolve_prompt(with_fixed, 5)
+
+        # composer_prompt 完全不受影响。
+        self.assertEqual(base_result["composer_prompt"], fixed_result["composer_prompt"])
+
+        def tags(prompt):
+            return [tag.strip() for tag in prompt.split(",") if tag.strip()]
+
+        base_tags = tags(base_result["full_prompt"])
+        fixed_tags = tags(fixed_result["full_prompt"])
+        # 去掉固定词后两份 tag 序列必须完全相同(含顺序)。
+        self.assertEqual([tag for tag in fixed_tags if tag != "red coat"], base_tags)
+        # 且固定词恰好只多出一次。
+        self.assertEqual(fixed_tags.count("red coat") - base_tags.count("red coat"), 1)
+
+    def test_fixed_expression_merges_into_composer_once(self):
+        """expression 是唯一会并入 composer_prompt 的固定维度,回填不能让它重复。"""
+        settings = validate_settings(
+            {"count": 1, "random_expression": False, "fixed_expression": "shy, blush"}
+        )
+        result = self.catalog.resolve_prompt(settings, 5)
+        tags = [tag.strip() for tag in result["composer_prompt"].split(",") if tag.strip()]
+        self.assertEqual(tags.count("shy"), 1)
+        self.assertEqual(tags.count("blush"), 1)
+        self.assertEqual(result["selected"]["expression"][0]["prompt"], "shy, blush")
 
 
 if __name__ == "__main__":

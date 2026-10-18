@@ -15,7 +15,7 @@ from anima_webui.combination_rules import CombinationRuleStore  # noqa: E402
 from anima_webui.comfy import ComfyAborted  # noqa: E402
 from anima_webui.history import HistoryStore  # noqa: E402
 from anima_webui.runner import BatchConflict, BatchManager  # noqa: E402
-from anima_webui.workflow import DEFAULT_SETTINGS  # noqa: E402
+from anima_webui.workflow import DEFAULT_SETTINGS, validate_settings  # noqa: E402
 
 
 class FakeTemplates:
@@ -1305,6 +1305,160 @@ class ContentRedrawRealCatalogTests(unittest.IsolatedAsyncioTestCase):
                 # blocked 必须被调用(固定维度参与校验),且确实命中了这条规则。
                 self.assertGreater(stats["blocked_called"], 0, f"{label} 未调用规则校验")
                 self.assertGreater(stats["rule_hits"], 0, f"{label} 规则从未命中")
+
+
+class RegenerationBackfillTests(unittest.IsolatedAsyncioTestCase):
+    """变体/复现路径也要回填固定词,否则变体图详情五维全空。"""
+
+    async def test_content_redraw_fills_untouched_fixed_sections(self):
+        """变体时未被重抽的维度,若历史 settings 有固定词,应回填到 selected。"""
+        with tempfile.TemporaryDirectory() as directory:
+            history = HistoryStore(Path(directory) / "history.sqlite3")
+            manager = BatchManager(FakeTemplates(), history, FakeComfy(), RedrawCatalog())
+            settings = validate_settings(
+                {
+                    "count": 1,
+                    "random_character": True,
+                    "random_clothing": True,
+                    "random_background": False,
+                    "fixed_background": "forest, outdoors",
+                }
+            )
+            regeneration = {
+                "mode": "content_redraw",
+                "redraw_sections": ["character"],
+                "fixed_selection": {},
+                "original_selection": {"character": [{"id": "character:new"}]},
+            }
+            resolved = manager._resolve_regeneration(settings, 123, regeneration)
+            backgrounds = resolved["selected"].get("background") or []
+            self.assertTrue(backgrounds, "固定背景词应回填到 selected")
+            self.assertTrue(backgrounds[0].get("fixed"))
+            self.assertEqual(backgrounds[0]["prompt"], "forest, outdoors")
+            await history.close()
+
+    async def test_content_redraw_backfill_is_isomorphic_with_pinned(self):
+        """回填条目必须与 _fixed_pinned() 同构,保证组合规则匹配一致。"""
+        with tempfile.TemporaryDirectory() as directory:
+            history = HistoryStore(Path(directory) / "history.sqlite3")
+            manager = BatchManager(FakeTemplates(), history, FakeComfy(), RedrawCatalog())
+            settings = validate_settings(
+                {
+                    "count": 1,
+                    "random_character": True,
+                    "random_pose": True,
+                    "random_expression": False,
+                    "fixed_expression": "shy, blush",
+                }
+            )
+            resolved = manager._resolve_regeneration(
+                settings,
+                7,
+                {
+                    "mode": "content_redraw",
+                    "redraw_sections": ["character"],
+                    "fixed_selection": {},
+                    "original_selection": {},
+                },
+            )
+            item = resolved["selected"]["expression"][0]
+            pinned = manager._fixed_pinned(settings)["expression"][0]
+            self.assertEqual(set(item), set(pinned))
+            for key in ("id", "section", "title", "subtitle", "prompt", "fixed"):
+                self.assertEqual(item[key], pinned[key], f"{key} 与 _fixed_pinned 不一致")
+            self.assertEqual(item["tags"], pinned["tags"])
+
+    async def test_backfill_does_not_override_existing_snapshot(self):
+        """已被重抽或已有快照的维度不能被固定词覆盖。"""
+        with tempfile.TemporaryDirectory() as directory:
+            history = HistoryStore(Path(directory) / "history.sqlite3")
+            manager = BatchManager(FakeTemplates(), history, FakeComfy(), RedrawCatalog())
+            settings = validate_settings(
+                {"count": 1, "random_character": True, "fixed_background": "forest"}
+            )
+            resolved = manager._resolve_regeneration(
+                settings,
+                11,
+                {
+                    "mode": "content_redraw",
+                    "redraw_sections": ["character"],
+                    "fixed_selection": {"background": [{"id": "background:room", "title": "room"}]},
+                    "original_selection": {},
+                },
+            )
+            backgrounds = resolved["selected"]["background"]
+            self.assertEqual(len(backgrounds), 1)
+            self.assertEqual(backgrounds[0]["id"], "background:room")
+            self.assertFalse(backgrounds[0].get("fixed"))
+            await history.close()
+
+    async def test_repin_does_not_change_changed_flag(self):
+        """回填不得影响 _changed 判定:它只看 redraw_sections 的 id 是否变化。"""
+        with tempfile.TemporaryDirectory() as directory:
+            history = HistoryStore(Path(directory) / "history.sqlite3")
+            manager = BatchManager(FakeTemplates(), history, FakeComfy(), RedrawCatalog())
+            settings = validate_settings(
+                {"count": 1, "random_character": True, "fixed_background": "forest"}
+            )
+            regeneration = {
+                "mode": "content_redraw",
+                "redraw_sections": ["character"],
+                "fixed_selection": {},
+                "original_selection": {"character": [{"id": "character:new"}]},
+            }
+            resolved = manager._resolve_regeneration(settings, 5, regeneration)
+            # original 已是 character:new,RedrawCatalog 也只产出该 id → 未变化。
+            self.assertFalse(resolved["_changed"])
+            self.assertTrue(resolved["selected"]["background"][0]["fixed"])
+            await history.close()
+
+    async def test_settings_reroll_fills_fixed_sections(self):
+        """设置重抽路径同样要带出固定词。"""
+        with tempfile.TemporaryDirectory() as directory:
+            history = HistoryStore(Path(directory) / "history.sqlite3")
+            manager = BatchManager(FakeTemplates(), history, FakeComfy(), RedrawCatalog())
+            settings = validate_settings(
+                {
+                    "count": 1,
+                    "random_character": True,
+                    "random_background": False,
+                    "fixed_background": "forest, outdoors",
+                }
+            )
+            resolved = manager._resolve_regeneration(
+                settings, 3, {"mode": "settings_reroll", "fixed_selection": {}}
+            )
+            backgrounds = resolved["selected"].get("background") or []
+            self.assertTrue(backgrounds, "设置重抽后固定背景词应回填到 selected")
+            self.assertTrue(backgrounds[0]["fixed"])
+            await history.close()
+
+    async def test_replay_fills_fixed_sections(self):
+        """复现路径的 selected 直接取历史快照,固定维度同样要补齐。"""
+        with tempfile.TemporaryDirectory() as directory:
+            history = HistoryStore(Path(directory) / "history.sqlite3")
+            manager = BatchManager(FakeTemplates(), history, FakeComfy(), RedrawCatalog())
+            settings = validate_settings(
+                {
+                    "count": 1,
+                    "random_character": True,
+                    "random_background": False,
+                    "fixed_background": "forest",
+                }
+            )
+            resolved = manager._resolve_regeneration(
+                settings,
+                3,
+                {
+                    "mode": "replay",
+                    "frozen_positive_prompt": "frozen, ",
+                    "fixed_selection": {"character": [{"id": "character:old", "title": "old"}]},
+                },
+            )
+            self.assertEqual(resolved["composer_prompt"], "frozen, ")
+            self.assertEqual(resolved["selected"]["character"][0]["id"], "character:old")
+            self.assertTrue(resolved["selected"]["background"][0]["fixed"])
+            await history.close()
 
 
 if __name__ == "__main__":

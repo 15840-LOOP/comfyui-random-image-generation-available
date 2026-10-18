@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Any
 
 from .comfy import ComfyAborted, ComfyError, extract_images, extract_positive_prompt
-from .catalog import PromptCatalog
+from .catalog import PromptCatalog, fixed_selection_item
 from .history import HistoryStore
 from .prompt_rules import PromptRuleStore
 from .workflow import MAX_SAMPLE_SEED, WorkflowError, WorkflowTemplates, validate_loras, validate_settings
@@ -25,11 +25,6 @@ class BatchConflict(RuntimeError):
 MAX_QUEUE = 20
 REGENERATION_MODES = {"replay", "prompt_variant", "content_redraw", "settings_reroll"}
 PROMPT_SECTIONS = ("character", "clothing", "pose", "background", "expression")
-
-
-def _squash(value: Any) -> str:
-    """折叠空白并去首尾,用于把 fixed_* 文本拆成稳定的 tag。"""
-    return " ".join(str(value or "").split())
 
 
 def validate_seeds(value: Any) -> dict[str, int] | None:
@@ -100,8 +95,9 @@ class BatchManager:
         """把固定提示词维度整理成 pinned 结构,供组合规则匹配。
 
         固定维度不参与随机抽取,但用户完全可能"固定角色 + 随机服装"后
-        想在图上禁用某个搭配。伪条目结构与 Task 4 写入 selected 的一致
-        (id 为空、fixed 标记),这样固定维度在所有抽取路径上规则行为一致。
+        想在图上禁用某个搭配。伪条目由 catalog.fixed_selection_item() 统一
+        生成,与写进 selected 的条目**是同一个函数**,因此固定维度在所有
+        抽取路径上的形状与规则行为必然一致(不会出现两处结构漂移)。
 
         形状对齐 catalog 条目,但**不假设 tag 顺序**:用户完全可能把
         fixed_character 写成 "1girl, alpha"(通用标签在前、角色名在后),
@@ -121,24 +117,7 @@ class BatchManager:
             fixed_text = str(settings.get(f"fixed_{section}") or "").strip()
             if not fixed_text:
                 continue
-            tags = [
-                tag
-                for tag in (
-                    _squash(tag) for tag in fixed_text.replace("，", ",").split(",")
-                )
-                if tag
-            ]
-            pinned[section] = [
-                {
-                    "id": "",
-                    "section": section,
-                    "title": fixed_text,
-                    "subtitle": "",
-                    "prompt": fixed_text,
-                    "tags": tags,
-                    "fixed": True,
-                }
-            ]
+            pinned[section] = [fixed_selection_item(section, fixed_text)]
         return pinned or None
 
     def _resolve_catalog_prompt(
@@ -623,6 +602,24 @@ class BatchManager:
         except ComfyError:
             pass
 
+    @staticmethod
+    def _backfill_fixed_sections(
+        settings: dict[str, Any], selected: dict[str, list[dict[str, Any]]]
+    ) -> dict[str, list[dict[str, Any]]]:
+        """为未重抽且无快照的维度补上固定词伪条目,使变体图也带可读信息。
+
+        与 catalog.resolve_prompt 的固定分支共用 fixed_selection_item(),
+        保证两处条目同构(组合规则 _pick_hit 对 fixed 条目按完整 tag 集判身份)。
+        """
+        result = dict(selected)
+        for section in PROMPT_SECTIONS:
+            if result.get(section):
+                continue
+            fixed_text = str(settings.get(f"fixed_{section}") or "").strip()
+            if fixed_text:
+                result[section] = [fixed_selection_item(section, fixed_text)]
+        return result
+
     def _resolve_regeneration(
         self,
         settings: dict[str, Any],
@@ -639,17 +636,21 @@ class BatchManager:
             return {
                 "composer_prompt": positive,
                 "full_prompt": positive,
-                "selected": fixed_selection,
+                "selected": self._backfill_fixed_sections(settings, fixed_selection),
             }
         if mode == "settings_reroll":
             # 与普通批次同一路径:整体重抽也必须让固定维度参与规则匹配,
             # 否则同一份规则在"生成"和"设置重抽"之间行为不一致。
-            return self._resolve_catalog_prompt(
+            resolved = self._resolve_catalog_prompt(
                 settings, prompt_seed, pinned=self._fixed_pinned(settings)
             ) if self.catalog else {
                 "composer_prompt": "",
                 "full_prompt": "",
                 "selected": {},
+            }
+            return {
+                **resolved,
+                "selected": self._backfill_fixed_sections(settings, resolved["selected"]),
             }
         if not self.catalog:
             raise WorkflowError("当前提示词目录不可用，无法重新抽取内容")
@@ -676,9 +677,14 @@ class BatchManager:
             merged[section] = copy.deepcopy(entries)
         redraw_sections = regeneration["redraw_sections"]
         original = regeneration.get("original_selection") or {}
+        # 变更判定只看 redraw_sections 的 id,固定词回填不得参与。
         changed = any(
             [item.get("id") for item in merged.get(section, [])]
             != [item.get("id") for item in original.get(section, [])]
             for section in redraw_sections
         )
-        return {**resolved, "selected": merged, "_changed": changed}
+        return {
+            **resolved,
+            "selected": self._backfill_fixed_sections(settings, merged),
+            "_changed": changed,
+        }

@@ -1520,7 +1520,19 @@ function renderDetail(record) {
   const loraText = activeLoras.length
     ? activeLoras.map((item) => `${escapeHtml(item.filename)} × ${escapeHtml(item.strength)}`).join("、")
     : "未使用";
-  ui.detailSelection.innerHTML = `<span class="kicker">ACTUAL DRAW</span><div>${SECTIONS.map((section) => `<span><b>${SECTION_META[section].label}</b>${(selected[section] || []).map((item) => escapeHtml(item.title)).join("、") || "未使用"}</span>`).join("")}<span><b>LoRA</b>${loraText}</span></div>`;
+  // 固定词维度在历史记录里可能是空数组(旧数据),此时回退读 settings.fixed_*
+  // 并标注"（固定）",避免详情弹窗把实际用了固定词的维度显示成"未使用"。
+  ui.detailSelection.innerHTML = `<span class="kicker">ACTUAL DRAW</span><div>${SECTIONS.map((section) => {
+    const items = selected[section] || [];
+    let text;
+    if (items.length) {
+      text = items.map((item) => escapeHtml(item.title)).join("、");
+    } else {
+      const fixedText = String((settings && settings[`fixed_${section}`]) || "").trim();
+      text = fixedText ? `${escapeHtml(fixedText)}（固定）` : "未使用";
+    }
+    return `<span><b>${SECTION_META[section].label}</b>${text}</span>`;
+  }).join("")}<span><b>LoRA</b>${loraText}</span></div>`;
 }
 
 function openDetail(record) {
