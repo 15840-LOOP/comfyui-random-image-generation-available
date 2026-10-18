@@ -5,6 +5,7 @@ import json
 import logging
 import random
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -550,12 +551,22 @@ class PromptCatalog:
             if section == "pose" and self._compatible_pose_sample(available, count, random.Random(0)) is None:
                 raise CatalogError(self._pose_conflict_error(available, count))
 
-    def resolve_prompt(self, settings: dict[str, Any], prompt_seed: int) -> dict[str, Any]:
+    # 组合规则命中后的重抽上限。用尽仍冲突说明该维度候选已被规则排除干净,
+    # 继续重抽只会空转,必须显式报错而不是静默返回一个被禁的组合。
+    MAX_REDRAW_ATTEMPTS = 200
+
+    def resolve_prompt(
+        self,
+        settings: dict[str, Any],
+        prompt_seed: int,
+        blocked: Callable[[dict[str, list[dict[str, Any]]]], str | None] | None = None,
+    ) -> dict[str, Any]:
         rng = random.Random(prompt_seed)
         selected: dict[str, list[dict[str, Any]]] = {section: [] for section in SECTIONS}
         composer_parts = compose_people_tags(settings.get("female_count", 0), settings.get("male_count", 0))
         seen = {normalize_text(value) for value in composer_parts}
         strip_people = bool(composer_parts)
+        last_rule = ""
         for section in SECTIONS:
             if not settings.get(f"random_{section}"):
                 if section == "expression":
@@ -565,12 +576,25 @@ class PromptCatalog:
                             seen.add(key)
                             composer_parts.append(part)
                 continue
-            entries = self.resolve_selection(
-                section,
-                settings.get("pools", {}).get(section, {}),
-                settings.get(f"random_{section}_count", 1),
-                rng,
-            )
+            count = settings.get(f"random_{section}_count", 1)
+            selection = settings.get("pools", {}).get(section, {})
+            entries: list[dict[str, Any]] = []
+            for _attempt in range(self.MAX_REDRAW_ATTEMPTS):
+                # 复用同一个 rng:同一种子下是否启用规则、是否触发重抽,
+                # 其余维度抽到的条目都一样,"复现此图"因此不会漂移。
+                entries = self.resolve_selection(section, selection, count, rng)
+                if blocked is None:
+                    break
+                trial = {**selected, section: entries}
+                last_rule = blocked(trial) or ""
+                if not last_rule:
+                    break
+            else:
+                if last_rule:
+                    raise CatalogError(
+                        f"{section} 维度无法避开组合规则 {last_rule}:"
+                        f"可用候选都被该规则排除,请删除这条规则或放宽对应词池"
+                    )
             selected[section] = entries
             for entry in entries:
                 for part in self.prompt_parts(

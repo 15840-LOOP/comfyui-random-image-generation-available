@@ -9,7 +9,7 @@ from pathlib import Path
 APP_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP_DIR))
 
-from anima_webui.catalog import CatalogError, PromptCatalog, compose_people_tags  # noqa: E402
+from anima_webui.catalog import SECTIONS, CatalogError, PromptCatalog, compose_people_tags  # noqa: E402
 from anima_webui.custom_prompts import MAX_GROUPS_PER_SECTION, CustomPromptStore  # noqa: E402
 from anima_webui.workflow import DEFAULT_SETTINGS, validate_settings  # noqa: E402
 
@@ -461,6 +461,119 @@ class CatalogTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(compose_people_tags(2, 1), ["2girls", "1boy"])
         with self.assertRaisesRegex(ValueError, "总人数"):
             validate_settings({**DEFAULT_SETTINGS, "female_count": 4, "male_count": 2})
+
+
+def build_catalog(root: Path) -> PromptCatalog:
+    """与 CatalogTests.setUp 同款最小数据集,供新用例复用。"""
+    tools = root / "tools"
+    js = tools / "js"
+    js.mkdir(parents=True)
+    datasets = {
+        "character_data.js": [
+            {"name": "alpha", "copyright": "series", "gender": "1girl", "hair": "blue", "eye": "red", "post_count": 20},
+        ],
+        "clothing_data.js": [
+            {"id": "coat", "name": "Coat", "name_zh": "外套", "tags": "red coat", "categories": ["日常/休闲 (Casual & Daily)"], "traits": ["red"]},
+            {"id": "dress", "name": "Dress", "name_zh": "礼服", "tags": "blue dress", "categories": ["礼服/裙装 (Dress & Gown)"], "traits": ["blue"]},
+        ],
+        "pose_data.js": [
+            {"id": "stand", "name": "Standing", "name_zh": "站立", "tags": "standing", "categories": ["站立与动态 (Standing & Dynamic)"], "traits": ["standing"]},
+            {"id": "sit", "name": "Sitting", "name_zh": "坐姿", "tags": "sitting", "categories": ["坐姿 (Sitting Poses)"], "traits": ["sitting"]},
+        ],
+        "background_data.js": [
+            {"id": "room", "name": "Room", "name_zh": "房间", "tags": "indoors", "categories": ["都市与日常 (Urban & Daily)"], "traits": ["indoor"]},
+            {"id": "forest", "name": "Forest", "name_zh": "森林", "tags": "forest", "categories": ["Nature & Outdoors"], "traits": ["outdoor"]},
+        ],
+    }
+    for filename, values in datasets.items():
+        (js / filename).write_text(f"const data = {json.dumps(values)};\n", encoding="utf-8")
+    official = {
+        "alpha||series": {"trigger": "alpha, series", "tags": ["1girl", "blue eyes"]},
+    }
+    (js / "character_official_data.json").write_text(json.dumps(official), encoding="utf-8")
+    return PromptCatalog(root, tools)
+
+
+class CombinationBlockingTests(unittest.TestCase):
+    """resolve_prompt 的 blocked 回调:命中规则时重抽,耗尽时抛 CatalogError。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.catalog = build_catalog(Path(self.temp.name))
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _settings(self, **overrides):
+        settings = validate_settings(
+            {
+                "count": 1,
+                "random_character": True,
+                "random_clothing": True,
+                "random_pose": True,
+                "random_background": True,
+                "random_expression": True,
+            }
+        )
+        settings.update(overrides)
+        return settings
+
+    def test_blocked_callback_is_invoked(self):
+        calls = []
+
+        def blocked(selection):
+            calls.append(dict(selection))
+            return None
+
+        self.catalog.resolve_prompt(self._settings(), 12345, blocked=blocked)
+        self.assertTrue(calls)
+
+    def test_respects_blocked_pair(self):
+        """服装池只有 2 项时,禁掉一个角色+服装配对后应稳定选中另一个。"""
+        settings = self._settings(random_character=False, random_pose=False,
+                                  random_background=False, random_expression=False)
+        settings["fixed_character"] = "alpha"
+        target = self.catalog.all_items("clothing")[0]
+
+        # 把这一维限制成 2 个候选
+        settings["pools"] = {
+            "clothing": {"mode": "include", "ids": [item["id"] for item in self.catalog.all_items("clothing")[:2]], "excluded_ids": []}
+        }
+
+        def blocked(selection):
+            for item in selection.get("clothing") or []:
+                if item["id"] == target["id"]:
+                    return "combo_test"
+            return None
+
+        for seed in range(20):
+            resolved = self.catalog.resolve_prompt(settings, seed, blocked=blocked)
+            picked = [item["id"] for item in resolved["selected"]["clothing"]]
+            self.assertNotIn(target["id"], picked, f"seed={seed} 仍抽中了被禁条目")
+
+    def test_exhaustion_raises_catalog_error(self):
+        """唯一候选被禁:200 次重抽后必须明确报错,而不是静默返回。"""
+        settings = self._settings(random_character=False, random_pose=False,
+                                  random_background=False, random_expression=False)
+        settings["fixed_character"] = "alpha"
+        only = self.catalog.all_items("clothing")[0]
+        settings["pools"] = {
+            "clothing": {"mode": "include", "ids": [only["id"]], "excluded_ids": []}
+        }
+
+        def blocked(_selection):
+            return "combo_impossible"
+
+        with self.assertRaises(CatalogError) as caught:
+            self.catalog.resolve_prompt(settings, 7, blocked=blocked)
+        self.assertIn("combo_impossible", str(caught.exception))
+
+    def test_no_blocked_keeps_backward_compatibility(self):
+        settings = self._settings()
+        resolved = self.catalog.resolve_prompt(settings, 99)
+        self.assertEqual(
+            set(resolved["selected"]), set(SECTIONS)
+        )
 
 
 if __name__ == "__main__":

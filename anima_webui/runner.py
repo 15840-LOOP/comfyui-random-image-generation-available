@@ -55,6 +55,7 @@ class BatchManager:
         comfy: Any,
         catalog: PromptCatalog | None = None,
         prompt_rules: PromptRuleStore | None = None,
+        combination_rules: Any | None = None,
     ):
         self.templates = templates
         self.history = history
@@ -65,6 +66,7 @@ class BatchManager:
         self.client_id = str(uuid.uuid4())
         self.catalog = catalog
         self.prompt_rules = prompt_rules
+        self.combination_rules = combination_rules
         # 排队中的批次(仅内存;WebUI 重启后队列清空,历史记录只在真正开跑时创建)。
         self.queue: list[dict[str, Any]] = []
         self.shutting_down = False
@@ -78,6 +80,25 @@ class BatchManager:
 
     def active(self) -> bool:
         return bool(self.task and not self.task.done())
+
+    def _blocked(self) -> Any:
+        """返回给 resolve_prompt 的组合规则回调;未配置规则时返回 None(完全保持旧行为)。"""
+        rules = self.combination_rules
+        if rules is None:
+            return None
+        return rules.match
+
+    def _resolve_catalog_prompt(self, settings: dict[str, Any], prompt_seed: int) -> dict[str, Any]:
+        """按当前配置抽取提示词。
+
+        只有在确实配置了组合规则时才传 blocked,未配置时保持旧调用形态:
+        这样按旧签名实现的目录替身/外部插件不会被新关键字参数打挂,
+        resolve_prompt 的 blocked 也因此始终是可选参数。
+        """
+        blocked = self._blocked()
+        if blocked is None:
+            return self.catalog.resolve_prompt(settings, prompt_seed)
+        return self.catalog.resolve_prompt(settings, prompt_seed, blocked=blocked)
 
     @staticmethod
     def _validate_regeneration(value: Any) -> dict[str, Any] | None:
@@ -337,7 +358,7 @@ class BatchManager:
                 date_folder = datetime.now().strftime("%Y-%m-%d")
                 prefix = f"AnimaRandom/{date_folder}/{batch_id}/image"
                 resolved = self._resolve_regeneration(settings, prompt_seed, regeneration) if regeneration else (
-                    self.catalog.resolve_prompt(settings, prompt_seed) if self.catalog else {
+                    self._resolve_catalog_prompt(settings, prompt_seed) if self.catalog else {
                         "composer_prompt": "",
                         "full_prompt": "",
                         "selected": {},
@@ -539,7 +560,7 @@ class BatchManager:
                 "selected": fixed_selection,
             }
         if mode == "settings_reroll":
-            return self.catalog.resolve_prompt(settings, prompt_seed) if self.catalog else {
+            return self._resolve_catalog_prompt(settings, prompt_seed) if self.catalog else {
                 "composer_prompt": "",
                 "full_prompt": "",
                 "selected": {},
@@ -561,7 +582,7 @@ class BatchManager:
                     )
                 )
             redraw_settings[f"fixed_{section}"] = ", ".join(parts)
-        resolved = self.catalog.resolve_prompt(redraw_settings, prompt_seed)
+        resolved = self._resolve_catalog_prompt(redraw_settings, prompt_seed)
         merged = copy.deepcopy(resolved["selected"])
         for section, entries in fixed_selection.items():
             merged[section] = copy.deepcopy(entries)
