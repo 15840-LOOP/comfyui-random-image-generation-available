@@ -211,7 +211,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   left: 50%;
   transform: translateX(-50%);
   display: grid;
-  grid-template-columns: auto minmax(200px, 400px) auto;
+  grid-template-columns: auto auto minmax(200px, 400px) auto;
   align-items: center;
   gap: 16px;
   max-width: calc(100vw - 24px);
@@ -1216,7 +1216,7 @@ html.image-preview-open #detailImage { visibility: hidden; }
   .topbar { gap: 12px; margin: 8px 10px 2px; padding-inline: 10px; }
   .brand-copy { display: none; }
   .batch-summary-copy span { display: none; }
-  .command-deck { bottom: 12px; grid-template-columns: auto minmax(100px, 1fr) auto; gap: 10px; width: calc(100vw - 20px); padding-left: 14px; }
+  .command-deck { bottom: 12px; grid-template-columns: auto auto minmax(100px, 1fr) auto; gap: 10px; width: calc(100vw - 20px); padding-left: 14px; }
   .status-badge { min-width: 36px; width: 36px; padding: 0; }
   .status-badge span { display: none; }
   .mobile-tabs { position: sticky; z-index: 25; top: var(--header-height); height: 48px; display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin: 0 10px; padding: 5px; background: var(--chrome); backdrop-filter: blur(var(--blur)) saturate(180%); -webkit-backdrop-filter: blur(var(--blur)) saturate(180%); border: 1px solid var(--separator); border-radius: 999px; box-shadow: inset 0 1px 0 var(--edge), var(--shadow-sm); }
@@ -1428,7 +1428,9 @@ html.image-preview-open #detailImage { visibility: hidden; }
 .rules-empty small { font-size: 12px; }
 
 /* ---------- 生成监视区 ---------- */
-.monitor-toggle { position: relative; display: inline-grid; place-items: center; padding: 0; border: 0; background: none; cursor: pointer; }
+/* 未生成时缩略图隐藏,按钮保留小三角占位;有预览时撑到 48px。 */
+.monitor-toggle { position: relative; display: inline-grid; place-items: center; min-width: 22px; min-height: 22px; padding: 0; border: 0; background: none; cursor: pointer; }
+.monitor-toggle:has(.live-preview:not([hidden])) { min-width: 48px; min-height: 48px; }
 .monitor-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 14px; }
 .monitor-toggle .live-preview { width: 48px; height: 48px; object-fit: cover; border-radius: 10px; border: 1px solid var(--separator); background: var(--surface-muted); }
 .monitor-toggle[aria-expanded="true"] .monitor-caret { transform: rotate(180deg); }
@@ -1443,13 +1445,15 @@ html.image-preview-open #detailImage { visibility: hidden; }
 /* 面板贴在底栏正上方:bottom 必须大于底栏实际高度,否则测量带被压住。
    底栏高度 = bottom(18) + 缩略图(48) + 上下 padding(9*2) + 边框 ≈ 86px,
    这里留 128px 余量,并用变量让两处改动时能一起调。 */
-:root { --monitor-gap: 128px; }
+:root { --monitor-gap: 92px; }
 .monitor-panel {
   position: fixed; z-index: 43; bottom: var(--monitor-gap); left: 50%;
   transform: translateX(-50%);
-  width: min(380px, calc(100vw - 24px));
-  max-height: calc(100vh - 168px);
-  display: grid; gap: 7px; padding: 8px;
+  width: min(360px, calc(100vw - 24px));
+  /* 上沿留出顶栏高度,任何窗口尺寸下都不越界。 */
+  max-height: calc(100vh - var(--monitor-gap) - 72px);
+  display: flex; flex-direction: column;
+  gap: 6px; padding: 8px;
   background: var(--chrome-solid, var(--chrome-heavy));
   border: 1px solid var(--separator);
   border-radius: 10px;
@@ -1459,7 +1463,9 @@ html.image-preview-open #detailImage { visibility: hidden; }
 .monitor-panel[hidden] { display: none; }
 .monitor-stage {
   position: relative; display: grid; place-items: center;
-  height: min(46vh, 340px);
+  /* 高度按视口算并与可用空间取较小值:窗口矮时不会把图片顶出屏幕。 */
+  height: clamp(140px, 32vh, 260px);
+  flex: 0 0 auto;
   overflow: hidden;
   border-radius: 6px;
   background: var(--surface-muted);
