@@ -5,11 +5,13 @@ import copy
 import logging
 import secrets
 import uuid
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
 from .comfy import ComfyAborted, ComfyError, extract_images, extract_positive_prompt
 from .catalog import PromptCatalog, fixed_selection_item
+from .combination_rules import CombinationRuleStore
 from .history import HistoryStore
 from .prompt_rules import PromptRuleStore
 from .workflow import MAX_SAMPLE_SEED, WorkflowError, WorkflowTemplates, validate_loras, validate_settings
@@ -55,7 +57,7 @@ class BatchManager:
         comfy: Any,
         catalog: PromptCatalog | None = None,
         prompt_rules: PromptRuleStore | None = None,
-        combination_rules: Any | None = None,
+        combination_rules: CombinationRuleStore | None = None,
     ):
         self.templates = templates
         self.history = history
@@ -81,7 +83,7 @@ class BatchManager:
     def active(self) -> bool:
         return bool(self.task and not self.task.done())
 
-    def _blocked(self) -> Any:
+    def _blocked(self) -> Callable[[dict[str, list[dict[str, Any]]]], str | None] | None:
         """返回给 resolve_prompt 的组合规则回调;未配置规则时返回 None(完全保持旧行为)。"""
         rules = self.combination_rules
         if rules is None:
