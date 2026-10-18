@@ -88,6 +88,35 @@ class BatchManager:
             return None
         return rules.match
 
+    @staticmethod
+    def _fixed_pinned(
+        settings: dict[str, Any],
+    ) -> dict[str, list[dict[str, Any]]] | None:
+        """把固定提示词维度整理成 pinned 结构,供组合规则匹配。
+
+        固定维度不参与随机抽取,但用户完全可能"固定角色 + 随机服装"后
+        想在图上禁用某个搭配。伪条目结构与 Task 4 写入 selected 的一致
+        (id 为空、fixed 标记),这样固定维度在所有抽取路径上规则行为一致。
+        """
+        pinned: dict[str, list[dict[str, Any]]] = {}
+        for section in PROMPT_SECTIONS:
+            if settings.get(f"random_{section}"):
+                continue
+            fixed_text = str(settings.get(f"fixed_{section}") or "").strip()
+            if not fixed_text:
+                continue
+            pinned[section] = [
+                {
+                    "id": "",
+                    "section": section,
+                    "title": fixed_text,
+                    "prompt": fixed_text,
+                    "tags": [],
+                    "fixed": True,
+                }
+            ]
+        return pinned or None
+
     def _resolve_catalog_prompt(
         self,
         settings: dict[str, Any],
@@ -378,7 +407,11 @@ class BatchManager:
                 date_folder = datetime.now().strftime("%Y-%m-%d")
                 prefix = f"AnimaRandom/{date_folder}/{batch_id}/image"
                 resolved = self._resolve_regeneration(settings, prompt_seed, regeneration) if regeneration else (
-                    self._resolve_catalog_prompt(settings, prompt_seed) if self.catalog else {
+                    self._resolve_catalog_prompt(
+                        settings,
+                        prompt_seed,
+                        pinned=self._fixed_pinned(settings),
+                    ) if self.catalog else {
                         "composer_prompt": "",
                         "full_prompt": "",
                         "selected": {},
@@ -583,7 +616,11 @@ class BatchManager:
                 "selected": fixed_selection,
             }
         if mode == "settings_reroll":
-            return self._resolve_catalog_prompt(settings, prompt_seed) if self.catalog else {
+            # 与普通批次同一路径:整体重抽也必须让固定维度参与规则匹配,
+            # 否则同一份规则在"生成"和"设置重抽"之间行为不一致。
+            return self._resolve_catalog_prompt(
+                settings, prompt_seed, pinned=self._fixed_pinned(settings)
+            ) if self.catalog else {
                 "composer_prompt": "",
                 "full_prompt": "",
                 "selected": {},

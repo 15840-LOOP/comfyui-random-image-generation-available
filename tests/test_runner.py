@@ -829,8 +829,13 @@ class BatchManagerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.comfy.submissions, [])
 
-    async def test_replay_ignores_combination_rules_by_design(self):
-        """replay 是"复现原图":规则后来新增也必须能回放,不能因规则失败。"""
+    async def test_replay_does_not_consult_combination_rules(self):
+        """replay 是"复现原图":规则后来新增也必须能回放。
+
+        该用例有区分力:若 replay 误走 resolve_prompt 或误做规则复检,
+        RedrawCatalog 会把 pose 换成非 old 的值、甚至因规则耗尽而报错,
+        下面的断言(照抄历史 selection 且 completed)就会失败。
+        """
         store = CombinationRuleStore(Path(self.temp.name) / "replay_rules.json")
         await store.create(
             {
@@ -840,21 +845,32 @@ class BatchManagerTests(unittest.IsolatedAsyncioTestCase):
                 }
             }
         )
+        # RedrawCatalog 的调用次数用来证明 replay 完全没有进抽取路径。
+        catalog = RedrawCatalog()
+        calls = []
+        original_resolve = catalog.resolve_prompt
+
+        def tracking_resolve(settings, prompt_seed, blocked=None):
+            calls.append(blocked)
+            return original_resolve(settings, prompt_seed, blocked=blocked)
+
+        catalog.resolve_prompt = tracking_resolve
         manager = BatchManager(
             FakeTemplates(),
             self.history,
             self.comfy,
-            RedrawCatalog(),
+            catalog,
             combination_rules=store,
         )
+        historical = {
+            "character": [{"id": "character:old", "title": "old", "prompt": "old"}],
+            "pose": [{"id": "pose:old", "title": "old", "prompt": "old"}],
+        }
         regeneration = {
             "mode": "replay",
             "frozen_positive_prompt": "historical final prompt ",
             "frozen_negative_prompt": "historical negative ",
-            "fixed_selection": {
-                "character": [{"id": "character:old", "title": "old", "prompt": "old"}],
-                "pose": [{"id": "pose:old", "title": "old", "prompt": "old"}],
-            },
+            "fixed_selection": historical,
         }
         await manager.start(
             {**DEFAULT_SETTINGS, "count": 1},
@@ -863,7 +879,11 @@ class BatchManagerTests(unittest.IsolatedAsyncioTestCase):
         )
         result = await manager.wait()
         self.assertEqual(result["status"], "completed")
-        self.assertEqual(self.comfy.submissions[-1]["resolved_prompt"], "historical final prompt ")
+        # replay 不抽取:目录一次都不该被调用。
+        self.assertEqual(calls, [])
+        submitted = self.comfy.submissions[-1]
+        self.assertEqual(submitted["resolved_selection"], historical)
+        self.assertEqual(submitted["resolved_prompt"], "historical final prompt ")
 
 
 class ContentRedrawRealCatalogTests(unittest.IsolatedAsyncioTestCase):
@@ -1013,6 +1033,122 @@ class ContentRedrawRealCatalogTests(unittest.IsolatedAsyncioTestCase):
             f"错误信息应点名规则 id,实际为: {result['error']}",
         )
         self.assertEqual(self.comfy.submissions, [])
+
+    async def test_plain_batch_rule_blocks_fixed_character_pairing(self):
+        """普通批次 + 固定角色 + 随机服装:规则必须生效(此前普通路径不传 pinned)。"""
+        store = CombinationRuleStore(self.rules_path / "plain_rules.json")
+        rule = await store.create(
+            {
+                "picks": {
+                    "character": {"text": "alpha, series", "label": "固定角色"},
+                    "clothing": {"id": "clothing:x", "label": "X"},
+                }
+            }
+        )
+        manager = BatchManager(
+            FakeTemplates(),
+            self.history,
+            self.comfy,
+            self.catalog,
+            combination_rules=store,
+        )
+        for prompt_seed in (1, 2, 3, 4, 5, 6, 7, 8):
+            with self.subTest(prompt_seed=prompt_seed):
+                await manager.start(
+                    self._settings(),
+                    seeds={"sample_seed": 9, "prompt_seed": prompt_seed},
+                )
+                await manager.wait()
+                submitted = self.comfy.submissions[-1]
+                ids = [
+                    item["id"]
+                    for item in submitted["resolved_selection"]["clothing"]
+                ]
+                self.assertNotIn("clothing:x", ids)
+                self.assertNotIn("x-tag", submitted["resolved_prompt"])
+        self.assertEqual(store.list()["items"][0]["id"], rule["id"])
+
+    async def test_plain_batch_exhaustion_raises_error_naming_rule(self):
+        """普通批次下候选全被禁也必须报错,而不是安静交出被禁组合。"""
+        store = CombinationRuleStore(self.rules_path / "plain_exhausted.json")
+        rule_ids = []
+        for clothing_id in ("clothing:x", "clothing:y", "clothing:z"):
+            rule = await store.create(
+                {
+                    "picks": {
+                        "character": {"text": "alpha, series", "label": "固定角色"},
+                        "clothing": {"id": clothing_id, "label": clothing_id},
+                    }
+                }
+            )
+            rule_ids.append(rule["id"])
+        manager = BatchManager(
+            FakeTemplates(),
+            self.history,
+            self.comfy,
+            self.catalog,
+            combination_rules=store,
+        )
+        await manager.start(
+            self._settings(),
+            seeds={"sample_seed": 9, "prompt_seed": 1},
+        )
+        result = await manager.wait()
+        self.assertEqual(result["status"], "error")
+        self.assertTrue(
+            any(rule_id in result["error"] for rule_id in rule_ids),
+            f"错误信息应点名规则 id,实际为: {result['error']}",
+        )
+        self.assertEqual(self.comfy.submissions, [])
+
+    async def test_same_rule_blocks_consistently_across_all_paths(self):
+        """同一份规则在普通批次 / content_redraw / settings_reroll 上行为必须一致。"""
+        store = CombinationRuleStore(self.rules_path / "consistency_rules.json")
+        await store.create(
+            {
+                "picks": {
+                    "character": {"text": "alpha, series", "label": "固定角色"},
+                    "clothing": {"id": "clothing:x", "label": "X"},
+                }
+            }
+        )
+        fixed_character = [self.catalog.get("character:alpha||series")]
+        results = {}
+        for label, kwargs in (
+            ("plain", {}),
+            ("content_redraw", {"regeneration": self._regeneration(fixed_character)}),
+            (
+                "settings_reroll",
+                {"regeneration": {"mode": "settings_reroll"}},
+            ),
+        ):
+            manager = BatchManager(
+                FakeTemplates(),
+                self.history,
+                self.comfy,
+                self.catalog,
+                combination_rules=store,
+            )
+            blocked_any = []
+            for prompt_seed in (1, 2, 3, 4, 5):
+                await manager.start(
+                    self._settings(),
+                    seeds={"sample_seed": 9, "prompt_seed": prompt_seed},
+                    **kwargs,
+                )
+                await manager.wait()
+                submitted = self.comfy.submissions[-1]
+                ids = [
+                    item["id"]
+                    for item in submitted["resolved_selection"].get("clothing", [])
+                ]
+                blocked_any.append("clothing:x" in ids)
+            results[label] = any(blocked_any)
+        self.assertEqual(
+            results,
+            {"plain": False, "content_redraw": False, "settings_reroll": False},
+            f"被禁服装在以下路径出现: {results}",
+        )
 
 
 if __name__ == "__main__":

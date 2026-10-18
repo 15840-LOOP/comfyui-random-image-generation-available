@@ -179,21 +179,178 @@ class CombinationRuleStoreTests(unittest.IsolatedAsyncioTestCase):
                 {"picks": picks(character=("x", "垃圾id"), clothing=("clothing:b", "服装B"))}
             )
 
-    async def test_fixed_prompt_dimension_is_rejected(self):
-        """固定提示词维度的伪条目 id 是空字符串,规则对它永远不生效,必须拒绝。"""
-        with self.assertRaisesRegex(WorkflowError, "固定提示词维度不能用于组合规则"):
+    async def test_fixed_prompt_dimension_is_accepted_with_text(self):
+        """固定维度走 text 形态:固定提示词不参与抽取,只能按文本匹配。"""
+        item = await self.store.create(
+            {
+                "picks": {
+                    "character": {"text": "alpha, series", "label": "固定角色"},
+                    "clothing": {"id": "clothing:b", "label": "服装B"},
+                }
+            }
+        )
+        pick = item["picks"]["character"]
+        self.assertEqual(pick["text"], "alpha, series")
+        self.assertEqual(pick["id"], "")
+        self.assertTrue(pick["fixed"])
+        self.assertEqual(pick["label"], "固定角色")
+        self.assertEqual(self.store.list()["count"], 1)
+
+    async def test_match_fixed_pick_by_text(self):
+        """固定伪条目(空 id + fixed)只靠 text 命中,随机条目 id 形态不受影响。"""
+        await self.store.create(
+            {
+                "picks": {
+                    "character": {"text": "alpha, series", "label": "固定角色"},
+                    "clothing": {"id": "clothing:b", "label": "服装B"},
+                }
+            }
+        )
+        fixed_character = {
+            "id": "",
+            "section": "character",
+            "prompt": "alpha, series",
+            "fixed": True,
+        }
+        clothing = {"id": "clothing:b"}
+        self.assertIsNotNone(
+            self.store.match({"character": [fixed_character], "clothing": [clothing]})
+        )
+        # 固定文本不同 -> 不命中
+        self.assertIsNone(
+            self.store.match(
+                {
+                    "character": [{**fixed_character, "prompt": "beta, series"}],
+                    "clothing": [clothing],
+                }
+            )
+        )
+        # 服装不同 -> 不命中
+        self.assertIsNone(
+            self.store.match(
+                {
+                    "character": [fixed_character],
+                    "clothing": [{"id": "clothing:other"}],
+                }
+            )
+        )
+
+    async def test_match_fixed_text_is_whitespace_normalized(self):
+        """固定提示词是手写文本,多余空白不应让规则静默失效。"""
+        await self.store.create(
+            {
+                "picks": {
+                    "character": {"text": "alpha,   series", "label": "固定角色"},
+                    "clothing": {"id": "clothing:b", "label": "服装B"},
+                }
+            }
+        )
+        self.assertIsNotNone(
+            self.store.match(
+                {
+                    "character": [
+                        {
+                            "id": "",
+                            "section": "character",
+                            "prompt": "  alpha, series  ",
+                            "fixed": True,
+                        }
+                    ],
+                    "clothing": [{"id": "clothing:b"}],
+                }
+            )
+        )
+
+    async def test_random_pick_does_not_match_fixed_pseudo_entry(self):
+        """随机维度规则不能因为固定伪条目 id 为空而被误命中。"""
+        await self.store.create(
+            {"picks": picks(character=("character:a", "A"), clothing=("clothing:b", "B"))}
+        )
+        self.assertIsNone(
+            self.store.match(
+                {
+                    "character": [{"id": "", "section": "character", "fixed": True}],
+                    "clothing": [{"id": "clothing:b"}],
+                }
+            )
+        )
+
+    async def test_fixed_pick_matches_entry_by_descriptive_text(self):
+        """固定维度按描述文本匹配,因此历史快照里的真实 catalog 条目也能命中。
+
+        content_redraw 的固定维度直接来自历史快照(真实条目,带 id 与 title),
+        与普通批次的伪条目结构不同;若只认 fixed 标记就会在两条路径上不一致。
+        """
+        await self.store.create(
+            {
+                "picks": {
+                    "character": {"text": "alpha, series", "label": "固定角色"},
+                    "clothing": {"id": "clothing:b", "label": "服装B"},
+                }
+            }
+        )
+        self.assertIsNotNone(
+            self.store.match(
+                {
+                    "character": [
+                        {
+                            "id": "character:alpha||series",
+                            "title": "alpha",
+                            "subtitle": "series",
+                            "prompt": "alpha, 1girl",
+                        }
+                    ],
+                    "clothing": [{"id": "clothing:b"}],
+                }
+            )
+        )
+        # 描述文本对不上的条目仍然不命中。
+        self.assertIsNone(
+            self.store.match(
+                {
+                    "character": [
+                        {"id": "character:beta||series", "title": "beta", "prompt": "beta"}
+                    ],
+                    "clothing": [{"id": "clothing:b"}],
+                }
+            )
+        )
+
+    async def test_id_and_text_together_are_rejected(self):
+        with self.assertRaisesRegex(WorkflowError, "不能同时提供 id 与 text"):
+            await self.store.create(
+                {
+                    "picks": {
+                        "character": {"id": "character:a", "text": "alpha"},
+                        "clothing": {"id": "clothing:b", "label": "服装B"},
+                    }
+                }
+            )
+
+    async def test_empty_text_is_rejected_with_its_own_message(self):
+        with self.assertRaisesRegex(WorkflowError, "固定提示词不能为空"):
+            await self.store.create(
+                {
+                    "picks": {
+                        "character": {"text": "   ", "label": "固定角色"},
+                        "clothing": {"id": "clothing:b", "label": "服装B"},
+                    }
+                }
+            )
+
+    async def test_missing_id_without_text_says_missing_id(self):
+        """忘填 id 与"想写固定维度"是两回事,文案必须区分。"""
+        with self.assertRaisesRegex(WorkflowError, "缺少 id"):
             await self.store.create(
                 {"picks": picks(character=("", "固定角色"), clothing=("clothing:b", "服装B"))}
             )
         self.assertEqual(self.store.list()["count"], 0)
 
-    async def test_blank_id_after_strip_is_rejected(self):
-        """只有空白的 id 与空字符串等价,同样属于固定维度误传。"""
+    async def test_blank_id_after_strip_says_missing_id(self):
+        """只有空白的 id 且没有 text,同样属于忘填 id。"""
         for blank in ("   ", "\t", "\n"):
             with self.subTest(blank=repr(blank)):
-                with self.assertRaisesRegex(
-                    WorkflowError, "固定提示词维度不能用于组合规则"
-                ):
+                with self.assertRaisesRegex(WorkflowError, "缺少 id"):
                     await self.store.create(
                         {
                             "picks": {
@@ -202,6 +359,37 @@ class CombinationRuleStoreTests(unittest.IsolatedAsyncioTestCase):
                             }
                         }
                     )
+
+    async def test_fixed_picks_dedupe_uses_text(self):
+        """固定维度按 text 判同:文本不同的两条规则不能被误判为同一条。"""
+        first = await self.store.create(
+            {
+                "picks": {
+                    "character": {"text": "alpha", "label": "A"},
+                    "clothing": {"id": "clothing:b", "label": "服装B"},
+                }
+            }
+        )
+        second = await self.store.create(
+            {
+                "picks": {
+                    "character": {"text": "beta", "label": "B"},
+                    "clothing": {"id": "clothing:b", "label": "服装B"},
+                }
+            }
+        )
+        self.assertNotEqual(first["id"], second["id"])
+        self.assertEqual(self.store.list()["count"], 2)
+        again = await self.store.create(
+            {
+                "picks": {
+                    "character": {"text": "alpha", "label": "A"},
+                    "clothing": {"id": "clothing:b", "label": "服装B"},
+                }
+            }
+        )
+        self.assertEqual(again["id"], first["id"])
+        self.assertEqual(self.store.list()["count"], 2)
 
     async def test_match_tolerates_non_mapping_selection(self):
         await self.store.create(

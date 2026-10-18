@@ -20,10 +20,47 @@ MAX_COMBINATION_RULES = 500
 MIN_PICKS = 2
 MAX_ITEM_ID = 300
 MAX_LABEL = 200
+MAX_PICK_TEXT = 500
 
 
 def _now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _normalize_text(value: Any) -> str:
+    """固定维度按文本匹配时使用的归一化:折叠空白、去掉首尾空白。
+
+    固定提示词是用户手写的自然语言(如 "alpha, series"),大小写与逗号后的
+    空格都可能不一致,因此必须归一化后再比较,否则规则会因一个空格而静默失效。
+    """
+    return " ".join(str(value or "").split())
+
+
+def _text_tags(value: Any) -> frozenset[str]:
+    """把一段提示词拆成归一化后的 tag 集合。"""
+    text = str(value or "").replace("，", ",")
+    return frozenset(
+        tag for tag in (_normalize_text(part) for part in text.split(",")) if tag
+    )
+
+
+def _item_tags(item: dict[str, Any]) -> frozenset[str]:
+    """汇总一个条目所有可读的描述文本,供固定维度按 tag 包含关系匹配。
+
+    固定维度的文本在两条路径上来源不同:普通批次来自 settings 的 fixed_*
+    原文(如 "alpha, series"),content_redraw 来自历史快照里的真实 catalog
+    条目(触发词在 title/prompt,系列在 subtitle,copyright 另存)。单一字段
+    比较必然对不上,因此汇总 title/subtitle/prompt/tags 后再判断包含关系,
+    同一份规则才能在两条路径上一致命中。
+    """
+    parts: set[str] = set()
+    for field in ("title", "subtitle", "prompt"):
+        parts |= _text_tags(item.get(field))
+    tags = item.get("tags")
+    if isinstance(tags, list):
+        for tag in tags:
+            parts |= _text_tags(tag)
+    return frozenset(parts)
 
 
 class CombinationRuleStore:
@@ -100,7 +137,15 @@ class CombinationRuleStore:
         return previous
 
     def match(self, selection: dict[str, list[dict[str, Any]]]) -> str | None:
-        """返回命中的规则 id。规则内所有维度都必须命中本次抽取结果。"""
+        """返回命中的规则 id。规则内所有维度都必须命中本次抽取结果。
+
+        匹配键有两种:
+        - 随机抽取维度:按 catalog 条目 id 全等比对;
+        - 固定提示词维度(pick 带 text):按提示词 tag 集合比对,因为固定维度
+          不参与随机抽取,拿不到稳定的 catalog id —— 且它在普通批次与
+          content_redraw 两条路径上的来源结构不同。
+        两种键都只与"同一维度"的条目比较,不会互相串味。
+        """
         # 该函数会在 server.py 的 except WorkflowError 之外被调用,
         # 任何非预期入参都不能变成 500:非法入参一律视为"未命中"。
         if not isinstance(selection, dict):
@@ -109,13 +154,33 @@ class CombinationRuleStore:
             picks = rule["picks"]
             if all(
                 any(
-                    isinstance(item, dict) and item.get("id") == pick["id"]
+                    self._pick_hit(item, pick, section)
                     for item in self._section_items(selection.get(section))
                 )
                 for section, pick in picks.items()
             ):
                 return rule["id"]
         return None
+
+    @classmethod
+    def _pick_hit(cls, item: Any, pick: dict[str, Any], section: str) -> bool:
+        """单个条目是否命中某条规则在该维度上的 pick。"""
+        if not isinstance(item, dict):
+            return False
+        if item.get("section") not in (None, section):
+            return False
+        text = pick.get("text")
+        if text is None:
+            # 随机维度:只与随机条目比 id,绝不把固定伪条目(空 id)算进来。
+            if item.get("fixed"):
+                return False
+            return item.get("id") == pick["id"]
+        # 固定维度:按 tag 集合包含关系比对。content_redraw 里固定维度来自历史
+        # 快照,是真实 catalog 条目(触发词在 title/prompt、系列在 subtitle);
+        # 普通批次里来自 settings 的 fixed_* 原文(如 "alpha, series")。两者字段
+        # 分布不同,汇总全部描述字段后判断"规则标签是否都被该维度包含",才能一致。
+        wanted = _text_tags(text)
+        return bool(wanted) and wanted.issubset(_item_tags(item))
 
     @staticmethod
     def _section_items(value: Any) -> list[Any]:
@@ -126,7 +191,14 @@ class CombinationRuleStore:
     def _same_picks(left: dict[str, Any], right: dict[str, Any]) -> bool:
         if set(left) != set(right):
             return False
-        return all(left[section]["id"] == right[section]["id"] for section in left)
+        for section in left:
+            # 固定维度按 text 判同,随机维度按 id 判同:两者不可混为一谈,
+            # 否则"固定角色A + 服装x"与"固定角色B + 服装x"会被误判为同一条。
+            l_key = _normalize_text(left[section].get("text") or "") or left[section].get("id", "")
+            r_key = _normalize_text(right[section].get("text") or "") or right[section].get("id", "")
+            if l_key != r_key:
+                return False
+        return True
 
     def _normalize(self, item: Any, existing: bool = False) -> dict[str, Any]:
         if not isinstance(item, dict):
@@ -141,17 +213,39 @@ class CombinationRuleStore:
             raise WorkflowError(
                 f"组合规则需要同时指定 {MIN_PICKS} 到 {len(SECTIONS)} 个维度"
             )
-        picks: dict[str, dict[str, str]] = {}
+        picks: dict[str, dict[str, Any]] = {}
         for section, value in raw_picks.items():
             if not isinstance(value, dict):
                 raise WorkflowError(f"组合规则的 {section} 必须是对象")
             item_id = str(value.get("id") or "").strip()
-            if not item_id:
-                # 固定提示词维度的伪条目 id 为空字符串:它不参与随机抽取,
-                # match() 永远不会命中。在这里拦住,避免创建一条永不生效的规则。
+            raw_text = value.get("text")
+            text = _normalize_text(raw_text) if raw_text is not None else ""
+            if text and item_id:
                 raise WorkflowError(
-                    f"固定提示词维度不能用于组合规则: {section} 不是随机抽取维度"
+                    f"组合规则的 {section} 不能同时提供 id 与 text,请只选其中一种"
                 )
+            if text:
+                # 固定提示词维度的匹配形态:固定维度不参与随机抽取,拿不到
+                # catalog id,只能按提示词文本匹配(见 match()/_pick_hit)。
+                if len(text) > MAX_PICK_TEXT:
+                    raise WorkflowError(f"组合规则的 {section} 固定提示词过长")
+                label = str(value.get("label") or "").strip() or text
+                if len(label) > MAX_LABEL:
+                    raise WorkflowError("组合规则标签过长")
+                picks[section] = {
+                    "id": "",
+                    "text": text,
+                    "label": label,
+                    "fixed": True,
+                }
+                continue
+            if not item_id:
+                if raw_text is not None:
+                    # 显式给了 text 却是空的:是想写固定维度但没填内容。
+                    raise WorkflowError(
+                        f"组合规则的 {section} 固定提示词不能为空"
+                    )
+                raise WorkflowError(f"组合规则的 {section} 缺少 id")
             if len(item_id) > MAX_ITEM_ID:
                 raise WorkflowError(f"组合规则的 {section} 条目 id 过长")
             # catalog 条目的 id 恒为 "<section>:..."(见 catalog._simple_key),

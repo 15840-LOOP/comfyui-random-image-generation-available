@@ -1288,8 +1288,26 @@ class CombinationRuleRoutesTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.post("/api/combination-rules", json=["picks"])
         self.assertEqual(response.status, 400)
 
-    async def test_create_rejects_fixed_prompt_dimension_with_clear_message(self):
-        """固定维度不参与匹配:前端传空 id 时应立刻得到明确 400,而不是建成死规则。"""
+    async def test_create_accepts_fixed_prompt_dimension_with_text(self):
+        """固定维度用 text 形态创建:前端据此可以禁用"固定角色 + 某服装"。"""
+        response = await self.client.post(
+            "/api/combination-rules",
+            json={
+                "picks": {
+                    "character": {"text": "alpha, series", "label": "固定角色"},
+                    "clothing": {"id": "clothing:y", "label": "服装Y"},
+                }
+            },
+        )
+        self.assertEqual(response.status, 201)
+        item = await response.json()
+        self.assertEqual(item["picks"]["character"]["text"], "alpha, series")
+        self.assertTrue(item["picks"]["character"]["fixed"])
+        listing = await (await self.client.get("/api/combination-rules")).json()
+        self.assertEqual(listing["count"], 1)
+
+    async def test_create_rejects_missing_id_without_text(self):
+        """忘填 id 与固定维度是两回事:没有 text 时提示缺少 id。"""
         response = await self.client.post(
             "/api/combination-rules",
             json={
@@ -1300,7 +1318,7 @@ class CombinationRuleRoutesTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertEqual(response.status, 400)
-        self.assertIn("固定提示词维度不能用于组合规则", (await response.json())["error"])
+        self.assertIn("缺少 id", (await response.json())["error"])
         self.assertEqual(
             (await (await self.client.get("/api/combination-rules")).json())["count"], 0
         )
