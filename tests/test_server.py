@@ -15,7 +15,14 @@ from aiohttp.test_utils import TestClient, TestServer
 APP_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP_DIR))
 
-from anima_webui.server import COMFY_KEY, HISTORY_KEY, MANAGER_KEY, create_app  # noqa: E402
+from anima_webui.combination_rules import CombinationRuleStore  # noqa: E402
+from anima_webui.server import (  # noqa: E402
+    COMBINATION_RULES_KEY,
+    COMFY_KEY,
+    HISTORY_KEY,
+    MANAGER_KEY,
+    create_app,
+)
 from anima_webui.workflow import DEFAULT_SETTINGS  # noqa: E402
 
 
@@ -1161,6 +1168,364 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(ok.status, 200)
                 await asyncio.sleep(0.7)
                 exit_mock.assert_called_once_with(0)
+        finally:
+            await client.close()
+
+
+class CombinationRuleRoutesTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        app = create_app(
+            app_dir=APP_DIR,
+            comfy=FakeComfy(),
+            history_path=Path(self.temp.name) / "history.sqlite3",
+            custom_prompts_path=Path(self.temp.name) / "custom_prompts.json",
+            style_presets_path=Path(self.temp.name) / "style_presets.json",
+            lora_trigger_overrides_path=Path(self.temp.name) / "lora_overrides.json",
+            prompt_replacements_path=Path(self.temp.name) / "prompt_replacements.json",
+            combination_rules_path=Path(self.temp.name) / "combination_rules.json",
+            anima_tools_dir=_write_fake_tools(Path(self.temp.name)),
+        )
+        self.app = app
+        self.client = TestClient(TestServer(app))
+        await self.client.start_server()
+
+    async def asyncTearDown(self):
+        await self.client.close()
+        self.temp.cleanup()
+
+    def _picks(self):
+        return {
+            "character": {"id": "character:x", "label": "角色X"},
+            "clothing": {"id": "clothing:y", "label": "服装Y"},
+        }
+
+    async def test_list_is_empty_initially(self):
+        response = await self.client.get("/api/combination-rules")
+        self.assertEqual(response.status, 200)
+        self.assertEqual((await response.json())["count"], 0)
+
+    async def test_create_returns_201_and_persists(self):
+        response = await self.client.post("/api/combination-rules", json={"picks": self._picks()})
+        self.assertEqual(response.status, 201)
+        item = await response.json()
+        self.assertTrue(item["id"].startswith("combo_"))
+        listing = await (await self.client.get("/api/combination-rules")).json()
+        self.assertEqual(listing["count"], 1)
+
+    async def test_create_rejects_single_dimension(self):
+        response = await self.client.post(
+            "/api/combination-rules",
+            json={"picks": {"character": {"id": "character:x", "label": "X"}}},
+        )
+        self.assertEqual(response.status, 400)
+
+    async def test_delete_unknown_returns_404(self):
+        response = await self.client.delete("/api/combination-rules/combo_missing")
+        self.assertEqual(response.status, 404)
+
+    async def test_delete_existing(self):
+        created = await (await self.client.post(
+            "/api/combination-rules", json={"picks": self._picks()}
+        )).json()
+        response = await self.client.delete(f"/api/combination-rules/{created['id']}")
+        self.assertEqual(response.status, 200)
+        listing = await (await self.client.get("/api/combination-rules")).json()
+        self.assertEqual(listing["count"], 0)
+
+    async def test_clear(self):
+        await self.client.post("/api/combination-rules", json={"picks": self._picks()})
+        response = await self.client.delete("/api/combination-rules")
+        self.assertEqual(response.status, 200)
+        self.assertEqual((await response.json())["cleared"], 1)
+
+    async def test_clear_matches_collection_route_not_single_rule(self):
+        # aiohttp 里两条 DELETE 路由必须各自可达:清空不能落到 {rule_id} 上。
+        created = await (await self.client.post(
+            "/api/combination-rules", json={"picks": self._picks()}
+        )).json()
+        cleared = await self.client.delete("/api/combination-rules")
+        self.assertEqual(cleared.status, 200)
+        self.assertEqual(await cleared.json(), {"cleared": 1})
+        # 清空后再删同一条:确实已不存在。
+        self.assertEqual(
+            (await self.client.delete(f"/api/combination-rules/{created['id']}")).status,
+            404,
+        )
+
+    async def test_delete_existing_returns_json(self):
+        created = await (await self.client.post(
+            "/api/combination-rules", json={"picks": self._picks()}
+        )).json()
+        response = await self.client.delete(f"/api/combination-rules/{created['id']}")
+        self.assertEqual(await response.json(), {"deleted": True})
+
+    async def test_create_rejects_unknown_and_bad_payloads(self):
+        cases = [
+            {"picks": self._picks(), "extra": 1},  # 未知参数
+            {
+                "picks": {
+                    "nonsense": {"id": "nonsense:x", "label": "X"},
+                    "clothing": {"id": "clothing:y", "label": "Y"},
+                }
+            },  # 未知维度
+            {
+                "picks": {
+                    "character": {"id": "x", "label": "X"},
+                    "clothing": {"id": "clothing:y", "label": "Y"},
+                }
+            },  # id 无维度前缀,永远命中不了
+            {"picks": "not-a-dict"},
+            {},  # 缺 picks
+        ]
+        for payload in cases:
+            with self.subTest(payload=payload):
+                response = await self.client.post("/api/combination-rules", json=payload)
+                self.assertEqual(response.status, 400)
+                self.assertIn("error", await response.json())
+
+    async def test_create_rejects_non_object_body(self):
+        response = await self.client.post("/api/combination-rules", json=["picks"])
+        self.assertEqual(response.status, 400)
+
+    async def test_duplicate_picks_are_idempotent(self):
+        first = await (await self.client.post(
+            "/api/combination-rules", json={"picks": self._picks()}
+        )).json()
+        second = await (await self.client.post(
+            "/api/combination-rules", json={"picks": self._picks()}
+        )).json()
+        self.assertEqual(first["id"], second["id"])
+        self.assertEqual(
+            (await (await self.client.get("/api/combination-rules")).json())["count"], 1
+        )
+
+    async def test_store_is_exposed_under_app_key(self):
+        store = self.app[COMBINATION_RULES_KEY]
+        self.assertEqual(store.list()["count"], 0)
+
+    def _failing_writes(self, app):
+        """让组合规则写盘抛 OSError(模拟磁盘已满/文件被占用)。"""
+        store = app[COMBINATION_RULES_KEY]
+        return mock.patch.object(
+            store, "_write_text", side_effect=OSError("磁盘已满")
+        )
+
+    async def test_create_maps_write_failure_to_500(self):
+        with self._failing_writes(self.app):
+            response = await self.client.post(
+                "/api/combination-rules", json={"picks": self._picks()}
+            )
+        self.assertEqual(response.status, 500)
+        payload = await response.json()
+        self.assertIn("写入组合规则文件失败", payload["error"])
+        # 写盘失败即"未创建成功":内存与文件都不能留下半成品。
+        self.assertEqual(
+            (await (await self.client.get("/api/combination-rules")).json())["count"], 0
+        )
+
+    async def test_delete_maps_write_failure_to_500(self):
+        created = await (await self.client.post(
+            "/api/combination-rules", json={"picks": self._picks()}
+        )).json()
+        with self._failing_writes(self.app):
+            response = await self.client.delete(
+                f"/api/combination-rules/{created['id']}"
+            )
+        self.assertEqual(response.status, 500)
+        self.assertIn("写入组合规则文件失败", (await response.json())["error"])
+        # 写失败即"未删除成功",规则必须仍在。
+        self.assertEqual(
+            (await (await self.client.get("/api/combination-rules")).json())["count"], 1
+        )
+
+    async def test_clear_maps_write_failure_to_500(self):
+        await self.client.post("/api/combination-rules", json={"picks": self._picks()})
+        with self._failing_writes(self.app):
+            response = await self.client.delete("/api/combination-rules")
+        self.assertEqual(response.status, 500)
+        self.assertIn("写入组合规则文件失败", (await response.json())["error"])
+        self.assertEqual(
+            (await (await self.client.get("/api/combination-rules")).json())["count"], 1
+        )
+
+    async def test_loaded_rules_are_served_and_injected_into_manager(self):
+        # 接线验证:落盘 → create_app → 列表可见 + BatchManager 拿到同一个 store。
+        path = Path(self.temp.name) / "seeded_rules.json"
+        store = CombinationRuleStore(path)
+        created = await store.create(
+            {
+                "picks": {
+                    "character": {"id": "character:x", "label": "角色X"},
+                    "clothing": {"id": "clothing:y", "label": "服装Y"},
+                }
+            }
+        )
+        app = create_app(
+            app_dir=APP_DIR,
+            comfy=FakeComfy(),
+            history_path=Path(self.temp.name) / "seeded-history.sqlite3",
+            custom_prompts_path=Path(self.temp.name) / "seeded-custom-prompts.json",
+            style_presets_path=Path(self.temp.name) / "seeded-style-presets.json",
+            combination_rules_path=path,
+            anima_tools_dir=Path(self.temp.name) / "tools",
+        )
+        try:
+            self.assertIs(app[COMBINATION_RULES_KEY], app[MANAGER_KEY].combination_rules)
+            self.assertEqual(
+                app[COMBINATION_RULES_KEY].list()["items"][0]["id"], created["id"]
+            )
+        finally:
+            # 该 app 未挂到 TestClient 上,on_cleanup 不会执行,手动关闭历史库。
+            await app[HISTORY_KEY].close()
+
+    async def test_load_warnings_are_reported_in_config(self):
+        path = Path(self.temp.name) / "broken_rules.json"
+        path.write_text("{not json", encoding="utf-8")
+        app = create_app(
+            app_dir=APP_DIR,
+            comfy=FakeComfy(),
+            history_path=Path(self.temp.name) / "broken-history.sqlite3",
+            custom_prompts_path=Path(self.temp.name) / "broken-custom-prompts.json",
+            style_presets_path=Path(self.temp.name) / "broken-style-presets.json",
+            combination_rules_path=path,
+            anima_tools_dir=Path(self.temp.name) / "tools",
+        )
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            warnings = (await (await client.get("/api/config")).json())["warnings"]
+            self.assertTrue(any("组合规则" in item for item in warnings))
+        finally:
+            await client.close()
+
+
+class CombinationRuleWiringTests(unittest.IsolatedAsyncioTestCase):
+    """端到端:真实 store + 真实 PromptCatalog,规则必须真的改变提交给 ComfyUI 的内容。"""
+
+    async def asyncSetUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        tools = self.root / "tools"
+        js = tools / "js"
+        js.mkdir(parents=True)
+        datasets = {
+            "character_data.js": [
+                {"name": "alpha", "copyright": "series", "gender": "1girl", "hair": "blue", "eye": "red", "post_count": 5},
+            ],
+            "clothing_data.js": [
+                {"id": "x", "name": "X", "name_zh": "X装", "tags": "x-tag", "categories": ["日常/休闲 (Casual & Daily)"], "traits": ["red"]},
+                {"id": "y", "name": "Y", "name_zh": "Y装", "tags": "y-tag", "categories": ["日常/休闲 (Casual & Daily)"], "traits": ["red"]},
+            ],
+            "pose_data.js": [
+                {"id": "stand", "name": "Standing", "name_zh": "站立", "tags": "standing", "categories": ["站立与动态 (Standing & Dynamic)"], "traits": ["standing"]},
+            ],
+            "background_data.js": [
+                {"id": "room", "name": "Room", "name_zh": "房间", "tags": "indoors", "categories": ["都市与日常 (Urban & Daily)"], "traits": ["indoor"]},
+            ],
+        }
+        for filename, values in datasets.items():
+            (js / filename).write_text(
+                f"const data = {json.dumps(values, ensure_ascii=False)};\n",
+                encoding="utf-8",
+            )
+        self.tools = tools
+        self.rules_path = self.root / "combination_rules.json"
+
+    async def asyncTearDown(self):
+        self.temp.cleanup()
+
+    def _settings(self):
+        settings = copy.deepcopy(DEFAULT_SETTINGS)
+        settings.update(
+            {
+                "count": 1,
+                "random_character": True,
+                "random_clothing": True,
+                "pools": {
+                    "character": {
+                        "mode": "include",
+                        "ids": ["character:alpha||series"],
+                        "excluded_ids": [],
+                    },
+                    "clothing": {"mode": "include", "ids": ["clothing:x", "clothing:y"], "excluded_ids": []},
+                    "pose": {"mode": "include", "ids": [], "excluded_ids": []},
+                    "background": {"mode": "include", "ids": [], "excluded_ids": []},
+                    "expression": {"mode": "include", "ids": [], "excluded_ids": []},
+                },
+            }
+        )
+        return settings
+
+    async def _run_batch(self, app, seeds):
+        comfy = app[COMFY_KEY]
+        manager = app[MANAGER_KEY]
+        await manager.start(self._settings(), seeds=seeds)
+        await manager.wait()
+        submission = comfy.submissions[-1]
+        return submission["extra_data"]["extra_pnginfo"]["anima_random_webui"]
+
+    async def test_enabled_rule_removes_blocked_combination_from_submission(self):
+        store = CombinationRuleStore(self.rules_path)
+        await store.create(
+            {
+                "picks": {
+                    "character": {"id": "character:alpha||series", "label": "alpha"},
+                    "clothing": {"id": "clothing:x", "label": "X"},
+                }
+            }
+        )
+        app = create_app(
+            app_dir=APP_DIR,
+            comfy=FakeComfy(),
+            history_path=self.root / "wired-history.sqlite3",
+            custom_prompts_path=self.root / "wired-custom-prompts.json",
+            style_presets_path=self.root / "wired-style-presets.json",
+            combination_rules_path=self.rules_path,
+            anima_tools_dir=self.tools,
+        )
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            # 启用规则后,被禁的 alpha + X 组合在任何种子下都不得出现。
+            for seed in (1, 2, 3, 4, 5, 6):
+                with self.subTest(seed=seed):
+                    submission = await self._run_batch(
+                        app, {"sample_seed": 7, "prompt_seed": seed}
+                    )
+                    self.assertEqual(
+                        [
+                            item["id"]
+                            for item in submission["resolved_selection"]["clothing"]
+                        ],
+                        ["clothing:y"],
+                    )
+                    self.assertIn("y-tag", submission["resolved_prompt"])
+                    self.assertNotIn("x-tag", submission["resolved_prompt"])
+        finally:
+            await client.close()
+
+    async def test_rule_off_lets_blocked_combination_through(self):
+        # 对照:同一份词池、同一种子,规则为空时必须能抽到 clothing:x。
+        app = create_app(
+            app_dir=APP_DIR,
+            comfy=FakeComfy(),
+            history_path=self.root / "plain-history.sqlite3",
+            custom_prompts_path=self.root / "plain-custom-prompts.json",
+            style_presets_path=self.root / "plain-style-presets.json",
+            combination_rules_path=self.rules_path,
+            anima_tools_dir=self.tools,
+        )
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            picked = set()
+            for seed in (1, 2, 3, 4, 5, 6):
+                submission = await self._run_batch(
+                    app, {"sample_seed": 7, "prompt_seed": seed}
+                )
+                picked.add(submission["resolved_selection"]["clothing"][0]["id"])
+            self.assertIn("clothing:x", picked)
         finally:
             await client.close()
 

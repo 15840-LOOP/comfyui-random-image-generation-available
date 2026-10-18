@@ -18,6 +18,7 @@ from aiohttp import web
 
 from .comfy import ComfyClient, ComfyError
 from .catalog import CatalogError, PromptCatalog, SECTIONS, resolve_output_dir
+from .combination_rules import CombinationRuleStore
 from .custom_prompts import CustomPromptStore
 from .favorites import FavoritesService, favorite_key
 from .history import HistoryStore
@@ -43,6 +44,7 @@ FAVORITES_KEY: web.AppKey[Any] = web.AppKey("favorites", object)
 STYLE_PRESETS_KEY: web.AppKey[Any] = web.AppKey("style_presets", object)
 LORA_TRIGGER_OVERRIDES_KEY: web.AppKey[Any] = web.AppKey("lora_trigger_overrides", object)
 PROMPT_RULES_KEY: web.AppKey[Any] = web.AppKey("prompt_rules", object)
+COMBINATION_RULES_KEY: web.AppKey[Any] = web.AppKey("combination_rules", object)
 ALLOWED_HOSTNAMES_KEY: web.AppKey[frozenset[str]] = web.AppKey(
     "allowed_hostnames", frozenset
 )
@@ -115,6 +117,17 @@ def _query_bool(request: web.Request, name: str, default: bool = False) -> bool:
     raise WorkflowError(f"{name} 必须是布尔值")
 
 
+def _rule_write_failure(error: OSError) -> web.Response:
+    """组合规则写盘失败(磁盘已满/文件被占用)统一映射为明确的 500。
+
+    CombinationRuleStore._write_text 抛出的 OSError 不在 error_middleware 的
+    WorkflowError 分支内,不在此拦截就会冒泡成没有文案的 500。store 采用
+    "先落盘再改内存"顺序,所以此时内存中的规则未变,用户重试即可。
+    """
+    logger.warning("写入组合规则文件失败: %s", error)
+    return web.json_response({"error": f"写入组合规则文件失败: {error}"}, status=500)
+
+
 def _reveal_in_file_manager(path: Path) -> None:
     """在系统文件管理器中定位并高亮选中该文件(阻塞调用,须经 to_thread 执行)。
 
@@ -138,6 +151,7 @@ def create_app(
     style_presets_path: str | Path | None = None,
     lora_trigger_overrides_path: str | Path | None = None,
     prompt_replacements_path: str | Path | None = None,
+    combination_rules_path: str | Path | None = None,
     anima_tools_dir: str | Path | None = None,
     trusted_hostnames: set[str] | frozenset[str] | None = None,
     data_dir: str | Path | None = None,
@@ -158,6 +172,9 @@ def create_app(
     prompt_rules = PromptRuleStore(
         prompt_replacements_path or storage / "prompt_replacements.json"
     )
+    combination_rules = CombinationRuleStore(
+        combination_rules_path or storage / "combination_rules.json"
+    )
     lora_trigger_overrides = LoraTriggerOverrideStore(
         lora_trigger_overrides_path or storage / "lora_trigger_overrides.json"
     )
@@ -166,7 +183,14 @@ def create_app(
     )
     templates = WorkflowTemplates.load(root / "templates")
     startup_defaults = configure_resources(templates, resource_paths)
-    manager = BatchManager(templates, history, client, catalog, prompt_rules)
+    manager = BatchManager(
+        templates,
+        history,
+        client,
+        catalog,
+        prompt_rules,
+        combination_rules=combination_rules,
+    )
 
     startup_warnings = [
         *history.load_warnings,
@@ -174,6 +198,7 @@ def create_app(
         *style_presets.load_warnings,
         *lora_trigger_overrides.load_warnings,
         *prompt_rules.load_warnings,
+        *combination_rules.load_warnings,
     ]
 
     app = web.Application(middlewares=[error_middleware, local_only_middleware])
@@ -192,6 +217,7 @@ def create_app(
     app[STYLE_PRESETS_KEY] = style_presets
     app[LORA_TRIGGER_OVERRIDES_KEY] = lora_trigger_overrides
     app[PROMPT_RULES_KEY] = prompt_rules
+    app[COMBINATION_RULES_KEY] = combination_rules
     app[OUTPUT_DIR_KEY] = resolved_output_dir
 
     async def favorite_keys(section: str, collection: str = "") -> set[str] | None:
@@ -622,6 +648,36 @@ def create_app(
             raise KeyError(rule_id)
         return web.json_response({"deleted": True})
 
+    async def list_combination_rules(_: web.Request) -> web.Response:
+        return web.json_response(combination_rules.list())
+
+    async def create_combination_rule(request: web.Request) -> web.Response:
+        # 入参校验全部由 CombinationRuleStore.create 的 WorkflowError 驱动,
+        # 由 error_middleware 统一映射成 400(match() 会静默吞错,不能指望它)。
+        payload = await _json_body(request)
+        try:
+            item = await combination_rules.create(payload)
+        except OSError as error:
+            return _rule_write_failure(error)
+        return web.json_response(item, status=201)
+
+    async def delete_combination_rule(request: web.Request) -> web.Response:
+        rule_id = request.match_info["rule_id"]
+        try:
+            deleted = await combination_rules.delete(rule_id)
+        except OSError as error:
+            return _rule_write_failure(error)
+        if not deleted:
+            raise KeyError(rule_id)
+        return web.json_response({"deleted": True})
+
+    async def clear_combination_rules(_: web.Request) -> web.Response:
+        try:
+            cleared = await combination_rules.clear()
+        except OSError as error:
+            return _rule_write_failure(error)
+        return web.json_response({"cleared": cleared})
+
     async def normalize_prompts(request: web.Request) -> web.Response:
         body = await _json_body(request)
         unknown = set(body) - {"fields", "managedTriggers"}
@@ -957,6 +1013,10 @@ def create_app(
     app.router.add_post("/api/prompt-rules", create_prompt_rule)
     app.router.add_put("/api/prompt-rules/{rule_id}", update_prompt_rule)
     app.router.add_delete("/api/prompt-rules/{rule_id}", delete_prompt_rule)
+    app.router.add_get("/api/combination-rules", list_combination_rules)
+    app.router.add_post("/api/combination-rules", create_combination_rule)
+    app.router.add_delete("/api/combination-rules", clear_combination_rules)
+    app.router.add_delete("/api/combination-rules/{rule_id}", delete_combination_rule)
     app.router.add_post("/api/prompts/normalize", normalize_prompts)
     app.router.add_get("/api/favorites/{section}", get_favorites)
     app.router.add_put("/api/favorites/{section}/item", update_favorite)
