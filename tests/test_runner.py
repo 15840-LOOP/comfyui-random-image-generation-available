@@ -1104,10 +1104,13 @@ class ContentRedrawRealCatalogTests(unittest.IsolatedAsyncioTestCase):
     async def test_generic_tag_rule_does_not_kill_the_whole_section(self):
         """回归 Critical:规则 text 只用通用标签(1girl)时不得把整维全禁。
 
-        通用标签只出现在 catalog 条目的 prompt/tags 里、不进 title,因此不该
-        命中任何固定维度条目。若命中,规则会退化成"该维度全禁" -> 疯狂换抽
-        直至 CatalogError。这里直接统计 match() 的命中次数,避免只看最终
-        产出被 AND 语义掩盖(服装维度不命中时结果一样)。
+        通用标签只出现在 catalog 条目的 prompt/tags 里、不进 title,因此不得
+        命中**真实 catalog 条目**——否则规则会退化成"该维度全禁",表现为疯狂
+        换抽直至 CatalogError。
+
+        注意:固定**伪条目**是例外。它的 title 就是用户原文、tag 顺序不可控
+        (用户可能写 "1girl, alpha"),所以按完整 tag 集判身份,text="1girl"
+        命中它是有意为之(见 test_fixed_rule_is_tag_order_independent_*)。
         """
         store = CombinationRuleStore(self.rules_path / "generic_tag_rules.json")
         await store.create(
@@ -1118,7 +1121,7 @@ class ContentRedrawRealCatalogTests(unittest.IsolatedAsyncioTestCase):
                 }
             }
         )
-        # 直接喂真实 catalog 条目:通用标签在 prompt/tags 里,不应被当成身份。
+        # 关键回归:通用标签不得在真实 catalog 条目上被判为身份。
         catalog_entry = self.catalog.get("character:alpha||series")
         self.assertIsNone(
             store.match(
@@ -1126,20 +1129,6 @@ class ContentRedrawRealCatalogTests(unittest.IsolatedAsyncioTestCase):
                     "character": [catalog_entry],
                     "clothing": [{"id": "clothing:x"}],
                 }
-            )
-        )
-        # 固定伪条目同样不该被通用标签命中。
-        pseudo = {
-            "id": "",
-            "section": "character",
-            "title": "alpha",
-            "subtitle": "series",
-            "prompt": "alpha, series, 1girl",
-            "fixed": True,
-        }
-        self.assertIsNone(
-            store.match(
-                {"character": [pseudo], "clothing": [{"id": "clothing:x"}]}
             )
         )
         # 端到端:批次能正常跑完,不出现候选耗尽。
@@ -1159,6 +1148,92 @@ class ContentRedrawRealCatalogTests(unittest.IsolatedAsyncioTestCase):
                 result = await manager.wait()
                 self.assertEqual(result["status"], "completed")
                 self.assertEqual(result["error"], "")
+
+    async def test_fixed_rule_is_tag_order_independent_generic_first(self):
+        """回归:固定词写成 "1girl, alpha"(通用标签在前)时规则仍必须命中。
+
+        此前 _fixed_pinned 把 title 设为第一个 tag,规则 text="alpha" 的主身份
+        判据会因 primary={1girl} 而永不命中 —— 规则静默失效。
+
+        区分力来自两处:①直接断言 match() 对伪条目命中(不受抽样运气影响);
+        ②扫描足够多的种子,确保被禁服装真的会出现过(否则"没抽到"就是假通过)。
+        """
+        store = CombinationRuleStore(self.rules_path / "order_generic_first.json")
+        rule = await store.create(
+            {
+                "picks": {
+                    "character": {"text": "alpha", "label": "alpha"},
+                    "clothing": {"id": "clothing:x", "label": "X"},
+                }
+            }
+        )
+        manager = BatchManager(
+            FakeTemplates(),
+            self.history,
+            self.comfy,
+            self.catalog,
+            combination_rules=store,
+        )
+        settings = {**self._settings(), "fixed_character": "1girl, alpha"}
+        # ① 伪条目的身份判据必须与 tag 顺序无关:alpha 在第二位也要命中。
+        pinned = manager._fixed_pinned(settings)
+        self.assertIsNotNone(
+            store.match({"character": pinned["character"], "clothing": [{"id": "clothing:x"}]}),
+            "固定词 '1girl, alpha' 下的 text='alpha' 规则必须命中",
+        )
+        # ② 端到端:足够多种子下被禁服装从未出现。
+        for prompt_seed in range(1, 13):
+            with self.subTest(prompt_seed=prompt_seed):
+                await manager.start(
+                    settings,
+                    seeds={"sample_seed": 9, "prompt_seed": prompt_seed},
+                )
+                result = await manager.wait()
+                self.assertEqual(result["status"], "completed")
+                submitted = self.comfy.submissions[-1]
+                ids = [
+                    item["id"]
+                    for item in submitted["resolved_selection"]["clothing"]
+                ]
+                self.assertNotIn("clothing:x", ids)
+        self.assertEqual(store.list()["items"][0]["id"], rule["id"])
+
+    async def test_fixed_rule_is_tag_order_independent_identity_first(self):
+        """反向顺序 "alpha, 1girl" 同样命中(改动前后都成立,锁住没有回归)。"""
+        store = CombinationRuleStore(self.rules_path / "order_identity_first.json")
+        await store.create(
+            {
+                "picks": {
+                    "character": {"text": "alpha", "label": "alpha"},
+                    "clothing": {"id": "clothing:x", "label": "X"},
+                }
+            }
+        )
+        manager = BatchManager(
+            FakeTemplates(),
+            self.history,
+            self.comfy,
+            self.catalog,
+            combination_rules=store,
+        )
+        settings = {**self._settings(), "fixed_character": "alpha, 1girl"}
+        pinned = manager._fixed_pinned(settings)
+        self.assertIsNotNone(
+            store.match({"character": pinned["character"], "clothing": [{"id": "clothing:x"}]})
+        )
+        for prompt_seed in range(1, 13):
+            with self.subTest(prompt_seed=prompt_seed):
+                await manager.start(
+                    settings,
+                    seeds={"sample_seed": 9, "prompt_seed": prompt_seed},
+                )
+                await manager.wait()
+                submitted = self.comfy.submissions[-1]
+                ids = [
+                    item["id"]
+                    for item in submitted["resolved_selection"]["clothing"]
+                ]
+                self.assertNotIn("clothing:x", ids)
 
     async def test_same_rule_blocks_consistently_across_all_paths(self):
         """同一份规则在普通批次 / content_redraw / settings_reroll 上行为必须一致。

@@ -187,13 +187,17 @@ class CombinationRuleStore:
             return item.get("id") == pick["id"]
         # 固定维度:必须以"主身份"命中,不能只靠通用标签蒙中。
         # content_redraw 里固定维度来自历史快照(真实 catalog 条目:title 是角色名、
-        # subtitle 是系列、prompt 是 trigger+tags);普通批次里来自 settings 的
-        # fixed_* 原文(如 "alpha, series")。先用 title 校验身份,再用剩余 tag 做
-        # 精确化(系列/分类),这样 text="1girl" 这类通用标签不会把整维全禁。
+        # subtitle 是系列、prompt 是 trigger+tags),主身份只能看 title;
+        # 普通批次里来自 settings 的 fixed_* 原文,用户写的 tag 顺序不可控
+        # (可能 "1girl, alpha"),不能假设身份在第一位,否则规则会静默失效。
         wanted = _text_tags(text)
         if not wanted:
             return False
-        primary = _primary_tags(item)
+        if item.get("fixed"):
+            # 固定伪条目的 tags 就是用户原文拆出来的全部 tag,用完整集合判身份。
+            primary = _item_tags(item)
+        else:
+            primary = _primary_tags(item)
         if not (wanted & primary):
             return False
         residual = wanted - primary

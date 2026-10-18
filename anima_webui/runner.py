@@ -103,10 +103,11 @@ class BatchManager:
         想在图上禁用某个搭配。伪条目结构与 Task 4 写入 selected 的一致
         (id 为空、fixed 标记),这样固定维度在所有抽取路径上规则行为一致。
 
-        形状刻意对齐 catalog 条目:title 放身份(第一个 tag,通常就是角色名/
-        条目名),subtitle 放系列等后续 tag,prompt 保留完整原文。这样固定
-        维度在"普通批次的伪条目"与"content_redraw 的历史真实条目"上
-        走同一套主身份判据,不会出现一边命中一边不命中。
+        形状对齐 catalog 条目,但**不假设 tag 顺序**:用户完全可能把
+        fixed_character 写成 "1girl, alpha"(通用标签在前、角色名在后),
+        若把 title 设为第一个 tag,规则 text="alpha" 的主身份判据就会因为
+        primary={1girl} 而永不命中,规则静默失效。因此 title 直接放完整原文、
+        tags 保留全部 tag,由 _pick_hit 对 fixed 伪条目用"完整 tag 集"判身份。
 
         已知差异:这里直接用 settings["fixed_<section>"] 原文,而 workflow.py
         提交时对 character 走 get_resolved_tags()(character_detail="trigger"
@@ -131,10 +132,10 @@ class BatchManager:
                 {
                     "id": "",
                     "section": section,
-                    "title": tags[0] if tags else fixed_text,
-                    "subtitle": ", ".join(tags[1:]),
+                    "title": fixed_text,
+                    "subtitle": "",
                     "prompt": fixed_text,
-                    "tags": tags[1:],
+                    "tags": tags,
                     "fixed": True,
                 }
             ]
