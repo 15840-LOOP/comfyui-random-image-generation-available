@@ -536,8 +536,39 @@
           </fieldset>
           <div class="regeneration-footer"><label class="regeneration-count"><span>生成数量</span><input id="variantDrawerCount" type="number" min="1" max="100" value="4"></label><button id="confirmVariant" class="button primary" type="button" disabled>生成同提示词变体</button></div>
         </section>
-        <div class="dialog-actions"><button id="restoreSettings" class="button primary" type="button">载入设置</button><button id="openFolder" class="button" type="button" title="在文件资源管理器中定位该图片">定位文件</button><button id="deleteRecord" class="button danger" type="button">删除记录</button></div>
+        <div class="dialog-actions"><button id="blockCombination" class="button" type="button" title="从当前图片选择维度禁用该搭配">禁用此组合</button><button id="restoreSettings" class="button primary" type="button">载入设置</button><button id="openFolder" class="button" type="button" title="在文件资源管理器中定位该图片">定位文件</button><button id="deleteRecord" class="button danger" type="button">删除记录</button></div>
       </div>
+    </div>
+  </dialog>
+
+  <dialog id="combinationDialog" class="combo-dialog" aria-labelledby="combinationDialogTitle">
+    <button id="closeCombinationDialog" class="dialog-close" type="button" title="关闭" aria-label="关闭">×</button>
+    <span class="kicker">BLOCK COMBINATION</span>
+    <h2 id="combinationDialogTitle">禁用这一组搭配</h2>
+    <p class="dialog-subtitle">勾选至少两个维度。只有当这些维度<strong>同时</strong>命中时才会跳过，其他搭配不受影响。</p>
+    <fieldset id="combinationPicks" class="combo-picks">
+      <legend class="sr-only">选择要禁用的维度</legend>
+    </fieldset>
+    <div class="dialog-actions">
+      <button id="manageCombinationRules" class="button ghost" type="button">管理已有规则</button>
+      <span></span>
+      <button id="cancelCombination" class="button" type="button">取消</button>
+      <button id="confirmCombination" class="button primary" type="button" disabled>禁用此搭配</button>
+    </div>
+  </dialog>
+
+  <dialog id="rulesDialog" class="combo-dialog" aria-labelledby="rulesDialogTitle">
+    <button id="closeRulesDialog" class="dialog-close" type="button" title="关闭" aria-label="关闭">×</button>
+    <span class="kicker">COMBINATION RULES</span>
+    <h2 id="rulesDialogTitle">组合规则</h2>
+    <p class="dialog-subtitle">这些搭配在随机抽取时会被跳过。</p>
+    <div id="rulesList" class="rules-list"></div>
+    <div id="rulesEmpty" class="rules-empty" hidden><strong>还没有组合规则</strong><small>在图片详情里点「禁用此组合」创建</small></div>
+    <div class="dialog-actions">
+      <button id="clearRules" class="button danger" type="button">清空全部</button>
+      <span></span>
+      <span></span>
+      <button id="closeRules" class="button primary" type="button">完成</button>
     </div>
   </dialog>
 

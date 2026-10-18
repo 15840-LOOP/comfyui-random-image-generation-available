@@ -108,6 +108,19 @@ const ui = Object.fromEntries(
     "restoreSettings",
     "openFolder",
     "deleteRecord",
+    "blockCombination",
+    "combinationDialog",
+    "closeCombinationDialog",
+    "combinationPicks",
+    "manageCombinationRules",
+    "cancelCombination",
+    "confirmCombination",
+    "rulesDialog",
+    "closeRulesDialog",
+    "rulesList",
+    "rulesEmpty",
+    "clearRules",
+    "closeRules",
     "toast",
     "poolDrawer",
     "drawerBackdrop",
@@ -1546,7 +1559,160 @@ function openDetail(record) {
   closeRegenerationDrawers(false);
   renderDetail(record);
   updatePreviewNavigation();
+  // 组合规则至少要两个维度才有意义;老记录的 resolved_selection 可能是空数组
+  // (固定词模式或 Task 4 之前落库),此时按钮置灰并说明原因,避免点了没反应。
+  const usable = countUsableSections(record);
+  ui.blockCombination.disabled = usable < 2;
+  ui.blockCombination.title = usable < 2
+    ? "这张图可用维度不足两个，无法创建组合规则"
+    : "从当前图片选择维度禁用该搭配";
   ui.detailDialog.showModal();
+}
+
+// ---------------------------------------------------------------------------
+// 组合规则:从当前图片挑两维以上禁用该搭配
+// ---------------------------------------------------------------------------
+
+let combinationRequest = 0;
+
+function sectionLabel(section) {
+  return SECTION_META[section]?.label || section;
+}
+
+// 只统计"这一维确实抽到了条目"的维度。固定词维度在 selected 里也可能有条目
+// (Task 4 写入的伪条目,id 为空),它们没有 catalog id、无法用于规则,所以
+// 只有带 id 的条目才算可用,避免用户勾了却在提交时失败。
+function usableSectionItems(record, section) {
+  const items = record?.resolved_selection?.[section] || [];
+  return items.filter((item) => item && item.id);
+}
+
+function countUsableSections(record) {
+  return SECTIONS.filter((section) => usableSectionItems(record, section).length > 0).length;
+}
+
+function openCombinationDialog(record) {
+  if (!record) return;
+  const usable = countUsableSections(record);
+  if (usable < 2) {
+    toast("这张图的可用维度不足两个（固定词模式或数据缺失）");
+    return;
+  }
+  const fieldset = ui.combinationPicks;
+  fieldset.replaceChildren(
+    ...SECTIONS.map((section) => {
+      const items = usableSectionItems(record, section);
+      const row = document.createElement("label");
+      row.className = "combo-pick";
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.value = section;
+      box.disabled = items.length === 0;
+      box.addEventListener("change", updateCombinationConfirm);
+      const copy = document.createElement("span");
+      const titles = (record.resolved_selection?.[section] || [])
+        .map((item) => item.title)
+        .filter(Boolean);
+      const summary = titles.length ? titles.join("、") : "这张图没有该维度";
+      const strong = document.createElement("strong");
+      strong.textContent = sectionLabel(section);
+      const small = document.createElement("small");
+      small.textContent = items.length ? summary : `${summary}（无 catalog id，不可用于规则）`;
+      copy.append(strong, small);
+      row.append(box, copy);
+      return row;
+    }),
+  );
+  updateCombinationConfirm();
+  ui.combinationDialog.showModal();
+}
+
+function updateCombinationConfirm() {
+  const checked = ui.combinationPicks.querySelectorAll("input:checked");
+  const count = checked.length;
+  ui.confirmCombination.disabled = count < 2;
+  ui.confirmCombination.textContent = count >= 2 ? `禁用这 ${count} 个维度的搭配` : "禁用此搭配";
+}
+
+async function submitCombination() {
+  if (!selectedRecord) return;
+  const checked = [...ui.combinationPicks.querySelectorAll("input:checked")].map((box) => box.value);
+  if (checked.length < 2) return;
+  const picks = {};
+  for (const section of checked) {
+    const item = usableSectionItems(selectedRecord, section)[0];
+    if (!item) {
+      toast(`${sectionLabel(section)} 没有可用的条目 id，无法禁用`);
+      return;
+    }
+    picks[section] = { id: item.id, label: item.title || item.id };
+  }
+  ui.confirmCombination.disabled = true;
+  try {
+    await request("/api/combination-rules", {
+      method: "POST",
+      body: JSON.stringify({ picks }),
+    });
+    ui.combinationDialog.close();
+    toast(`已禁用这 ${checked.length} 个维度的搭配`);
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    // 关闭成功时对话框已关,保留禁用态没有副作用;失败时恢复可再次提交。
+    if (ui.combinationDialog.open) ui.confirmCombination.disabled = false;
+  }
+}
+
+async function loadRules() {
+  const requestId = ++combinationRequest;
+  try {
+    const payload = await request("/api/combination-rules");
+    if (requestId !== combinationRequest) return;
+    renderRules(payload.items || []);
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+function renderRules(items) {
+  ui.rulesEmpty.hidden = items.length > 0;
+  ui.rulesList.hidden = items.length === 0;
+  ui.clearRules.disabled = items.length === 0;
+  ui.rulesList.replaceChildren(
+    ...items.map((rule) => {
+      const row = document.createElement("div");
+      row.className = "rule-row";
+      const copy = document.createElement("span");
+      const labels = SECTIONS.filter((section) => rule.picks?.[section]).map(
+        (section) => `${sectionLabel(section)}：${rule.picks[section].label}`,
+      );
+      copy.textContent = labels.join("  +  ");
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "button danger compact";
+      remove.textContent = "删除";
+      remove.addEventListener("click", async () => {
+        remove.disabled = true;
+        try {
+          await request(`/api/combination-rules/${encodeURIComponent(rule.id)}`, { method: "DELETE" });
+          await loadRules();
+        } catch (error) {
+          toast(error.message);
+          remove.disabled = false;
+        }
+      });
+      row.append(copy, remove);
+      return row;
+    }),
+  );
+}
+
+async function openRulesDialog() {
+  ui.rulesDialog.showModal();
+  ui.rulesList.replaceChildren();
+  ui.rulesEmpty.hidden = false;
+  ui.rulesList.hidden = true;
+  await loadRules();
 }
 
 const IMAGE_PREVIEW_MAX_ZOOM = 4;
@@ -4669,6 +4835,26 @@ ui.detailDialog.addEventListener("cancel", (event) => {
   if (!ui.replayDrawer.hidden || !ui.variantDrawer.hidden) {
     event.preventDefault();
     closeRegenerationDrawers();
+  }
+});
+ui.blockCombination.addEventListener("click", () => openCombinationDialog(selectedRecord));
+ui.closeCombinationDialog.addEventListener("click", () => ui.combinationDialog.close());
+ui.cancelCombination.addEventListener("click", () => ui.combinationDialog.close());
+ui.confirmCombination.addEventListener("click", submitCombination);
+ui.manageCombinationRules.addEventListener("click", () => {
+  ui.combinationDialog.close();
+  openRulesDialog();
+});
+ui.closeRulesDialog.addEventListener("click", () => ui.rulesDialog.close());
+ui.closeRules.addEventListener("click", () => ui.rulesDialog.close());
+ui.clearRules.addEventListener("click", async () => {
+  if (!confirm("清空全部组合规则？此操作不可撤销。")) return;
+  try {
+    await request("/api/combination-rules", { method: "DELETE" });
+    await loadRules();
+    toast("已清空组合规则");
+  } catch (error) {
+    toast(error.message);
   }
 });
 ui.restoreSettings.addEventListener("click", () => {

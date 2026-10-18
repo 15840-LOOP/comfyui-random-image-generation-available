@@ -1403,3 +1403,22 @@ html.image-preview-open #detailImage { visibility: hidden; }
 @media (prefers-reduced-transparency: reduce) {
   .regeneration-drawer { background: var(--chrome-solid); }
 }
+
+/* ---------- 组合规则 ---------- */
+.combo-dialog { width: min(560px, calc(100vw - 32px)); padding: 26px; }
+.combo-dialog > .kicker { display: block; margin-bottom: 8px; }
+.combo-dialog > h2 { margin: 0 0 6px; font-size: 19px; font-weight: 650; }
+.combo-dialog > .dialog-subtitle { margin: 0 0 4px; color: var(--text-secondary); font-size: 12px; line-height: 1.55; }
+.combo-picks { display: grid; gap: 8px; margin: 14px 0 18px; padding: 0; border: 0; }
+.combo-pick { display: grid; grid-template-columns: auto 1fr; align-items: start; gap: 10px; padding: 10px 12px; border: 1px solid var(--separator); border-radius: 10px; cursor: pointer; }
+.combo-pick:has(input:disabled) { opacity: .45; cursor: not-allowed; }
+.combo-pick input { margin-top: 2px; }
+.combo-pick strong { font-size: 13px; font-weight: 600; }
+.combo-pick small { display: block; color: var(--text-secondary); font-size: 12px; margin-top: 2px; word-break: break-word; }
+.rules-list { display: grid; gap: 6px; max-height: 46vh; overflow-y: auto; margin: 12px 0; }
+.rule-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 12px; border: 1px solid var(--separator); border-radius: 10px; font-size: 13px; }
+.rule-row span { min-width: 0; overflow-wrap: anywhere; }
+.rule-row .button { flex: 0 0 auto; }
+.rules-empty { display: grid; gap: 4px; justify-items: center; padding: 28px 0; color: var(--text-secondary); text-align: center; }
+.rules-empty strong { color: var(--text); font-size: 14px; font-weight: 600; }
+.rules-empty small { font-size: 12px; }
