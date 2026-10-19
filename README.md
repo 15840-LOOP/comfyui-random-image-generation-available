@@ -1,4 +1,4 @@
-# Anima Random Studio (v7.0 独立重构版)
+# Anima Random Studio
 
 基于 [ComfyUI](https://www.google.com/search?q=https%3A%2F%2Fgithub.com%2Fcomfyanonymous%2FComfyUI "null") 与 [Anima Tools](https://www.google.com/search?q=https%3A%2F%2Fgithub.com%2Fnregret%2FComfyui-Anima-Tools "null") 生态深度构建的**本地轻量化随机生图工作台与全生命周期数字资产管理系统**。
 
