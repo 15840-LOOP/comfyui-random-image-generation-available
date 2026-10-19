@@ -1,0 +1,4 @@
+MIT License
+
+Copyright (c) 2026 159159pzy-crypto (Original Work)
+Copyright (c) 2026 15840-LOOP (Refactored Version)

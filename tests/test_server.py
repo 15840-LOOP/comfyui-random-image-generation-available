@@ -437,6 +437,86 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         served = await self.client.get(f"/api/style-presets/{item['id']}/thumbnail")
         self.assertEqual(served.status, 200)
 
+    async def test_style_preset_batch_delete_and_collections(self):
+        snapshot = {
+            key: copy.deepcopy(DEFAULT_SETTINGS[key])
+            for key in ("model_name", "loras", "lora_managed_triggers", "hires", "detailers", "manual_artist", "quality_prompt", "extra_prompt", "negative_prompt", "width", "height", "steps", "cfg", "sampler_name", "scheduler")
+        }
+        ids = []
+        for name in ("BatchA", "BatchB", "BatchC"):
+            created = await self.client.post(
+                "/api/style-presets",
+                json={"name": name, "favorite": False, "settings": snapshot},
+            )
+            self.assertEqual(created.status, 201)
+            ids.append((await created.json())["id"])
+
+        # 批量分类:add 模式挂到新建收藏夹。
+        collection = await self.client.post(
+            "/api/style-presets/collections", json={"name": "批量测试"}
+        )
+        self.assertEqual(collection.status, 201)
+        collection_id = (await collection.json())["id"]
+
+        added = await self.client.post(
+            "/api/style-presets/batch-collections",
+            json={"preset_ids": ids[:2], "collection_ids": [collection_id], "mode": "add"},
+        )
+        self.assertEqual(added.status, 200)
+        added_payload = await added.json()
+        self.assertEqual(added_payload["mode"], "add")
+        self.assertEqual(added_payload["updated_count"], 2)
+
+        listing = await (await self.client.get("/api/style-presets")).json()
+        by_id = {item["id"]: item for item in listing["items"]}
+        self.assertEqual(by_id[ids[0]]["collection_ids"], [collection_id])
+        self.assertEqual(by_id[ids[2]]["collection_ids"], [])
+
+        # set 模式覆盖为默认收藏夹,应同步 favorite。
+        await self.client.post(
+            "/api/style-presets/batch-collections",
+            json={"preset_ids": [ids[0]], "collection_ids": [1], "mode": "set"},
+        )
+        listing = await (await self.client.get("/api/style-presets")).json()
+        by_id = {item["id"]: item for item in listing["items"]}
+        self.assertTrue(by_id[ids[0]]["favorite"])
+        self.assertEqual(by_id[ids[0]]["collection_ids"], [1])
+
+        # 参数校验:空数组、非法 mode、非数组 collection_ids 均返回 400。
+        empty = await self.client.post(
+            "/api/style-presets/batch-collections",
+            json={"preset_ids": [], "collection_ids": [1], "mode": "add"},
+        )
+        self.assertEqual(empty.status, 400)
+        bad_mode = await self.client.post(
+            "/api/style-presets/batch-collections",
+            json={"preset_ids": [ids[0]], "collection_ids": [1], "mode": "toggle"},
+        )
+        self.assertEqual(bad_mode.status, 400)
+        bad_ids = await self.client.post(
+            "/api/style-presets/batch-collections",
+            json={"preset_ids": [ids[0]], "collection_ids": "1", "mode": "add"},
+        )
+        self.assertEqual(bad_ids.status, 400)
+
+        # 批量删除:静态段路由必须命中批量端点,而不是被 {preset_id} 吞掉。
+        deleted = await self.client.post(
+            "/api/style-presets/batch-delete",
+            json={"preset_ids": [ids[0], ids[1], "missing"]},
+        )
+        self.assertEqual(deleted.status, 200)
+        deleted_payload = await deleted.json()
+        self.assertEqual(deleted_payload["deleted"], 2)
+        self.assertEqual(deleted_payload["requested"], 3)
+
+        listing = await (await self.client.get("/api/style-presets")).json()
+        self.assertEqual([item["id"] for item in listing["items"]], [ids[2]])
+
+        empty_delete = await self.client.post(
+            "/api/style-presets/batch-delete", json={"preset_ids": []}
+        )
+        self.assertEqual(empty_delete.status, 400)
+
     async def test_style_preset_thumbnail_rejects_unknown_source_image(self):
         snapshot = {
             key: copy.deepcopy(DEFAULT_SETTINGS[key])
@@ -1120,6 +1200,113 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await client.close()
 
+    async def _delete_history_client(self, output_dir):
+        """构造一个显式绑定 output_dir 的独立 app,用于物理删除测试。"""
+        app = create_app(
+            app_dir=APP_DIR,
+            comfy=FakeComfy(),
+            history_path=Path(self.temp.name) / "delete-history.sqlite3",
+            custom_prompts_path=Path(self.temp.name) / "delete-custom-prompts.json",
+            style_presets_path=Path(self.temp.name) / "delete-style-presets.json",
+            anima_tools_dir=Path(self.temp.name) / "tools",
+            output_dir=output_dir,
+        )
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        return client
+
+    async def test_delete_history_removes_physical_file_and_tolerates_missing(self):
+        # 删除作品必须同步清理磁盘文件;文件已被手动移走时仍应清理数据库记录。
+        output_dir = Path(self.temp.name) / "output-delete"
+        output_dir.mkdir()
+        client = await self._delete_history_client(output_dir)
+        try:
+            response = await client.post("/api/batches", json={**DEFAULT_SETTINGS, "count": 1})
+            self.assertEqual(response.status, 201)
+            await client.server.app[MANAGER_KEY].wait()
+            history = await (await client.get("/api/history")).json()
+            first_id = history["items"][0]["id"]
+            physical = output_dir / "test.png"
+            physical.write_bytes(b"png")
+
+            deleted = await client.delete(f"/api/history/{first_id}")
+            self.assertEqual(deleted.status, 200)
+            self.assertEqual(
+                await deleted.json(), {"deleted": True, "file_deleted": True}
+            )
+            self.assertFalse(physical.exists())
+            self.assertEqual((await client.get(f"/api/images/{first_id}")).status, 404)
+
+            # 第二条记录:磁盘上没有对应文件(幽灵记录),删除不应报错。
+            second = await client.post("/api/batches", json={**DEFAULT_SETTINGS, "count": 1})
+            self.assertEqual(second.status, 201)
+            await client.server.app[MANAGER_KEY].wait()
+            history = await (await client.get("/api/history")).json()
+            second_id = history["items"][0]["id"]
+            self.assertFalse((output_dir / "test.png").exists())
+
+            ghost = await client.delete(f"/api/history/{second_id}")
+            self.assertEqual(ghost.status, 200)
+            self.assertEqual(
+                await ghost.json(), {"deleted": True, "file_deleted": False}
+            )
+            self.assertEqual((await client.get(f"/api/images/{second_id}")).status, 404)
+        finally:
+            await client.close()
+
+    async def test_delete_history_rejects_path_traversal(self):
+        # 篡改为穿越路径的记录:绝不 unlink 作用域外文件,但仍清理数据库记录。
+        output_dir = Path(self.temp.name) / "output-delete-traversal"
+        output_dir.mkdir()
+        outside = Path(self.temp.name) / "outside.png"
+        outside.write_bytes(b"keep")
+        client = await self._delete_history_client(output_dir)
+        try:
+            response = await client.post("/api/batches", json={**DEFAULT_SETTINGS, "count": 1})
+            self.assertEqual(response.status, 201)
+            await client.server.app[MANAGER_KEY].wait()
+            history = await (await client.get("/api/history")).json()
+            image_id = history["items"][0]["id"]
+            store = client.server.app[HISTORY_KEY]
+            store.connection.execute(
+                "UPDATE images SET filename = ? WHERE id = ?",
+                ("../outside.png", image_id),
+            )
+            store.connection.commit()
+
+            deleted = await client.delete(f"/api/history/{image_id}")
+            self.assertEqual(deleted.status, 200)
+            self.assertEqual(
+                await deleted.json(), {"deleted": True, "file_deleted": False}
+            )
+            self.assertTrue(outside.exists())
+            self.assertEqual((await client.get(f"/api/images/{image_id}")).status, 404)
+        finally:
+            await client.close()
+
+    async def test_delete_history_keeps_record_when_file_is_locked(self):
+        # 文件被占用时返回 500 且不提交数据库删除,保证状态一致。
+        output_dir = Path(self.temp.name) / "output-delete-locked"
+        output_dir.mkdir()
+        client = await self._delete_history_client(output_dir)
+        try:
+            response = await client.post("/api/batches", json={**DEFAULT_SETTINGS, "count": 1})
+            self.assertEqual(response.status, 201)
+            await client.server.app[MANAGER_KEY].wait()
+            history = await (await client.get("/api/history")).json()
+            image_id = history["items"][0]["id"]
+            physical = output_dir / "test.png"
+            physical.write_bytes(b"png")
+
+            with mock.patch.object(Path, "unlink", side_effect=PermissionError("locked")):
+                locked = await client.delete(f"/api/history/{image_id}")
+            self.assertEqual(locked.status, 500)
+            self.assertIn("无法删除本地物理文件", (await locked.json())["error"])
+            self.assertTrue(physical.exists())
+            self.assertEqual((await client.get(f"/api/images/{image_id}")).status, 200)
+        finally:
+            await client.close()
+
     async def test_config_exposes_output_dir(self):
         output_dir = Path(self.temp.name) / "output-config"
         output_dir.mkdir()
@@ -1161,6 +1348,358 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(ok.status, 200)
                 await asyncio.sleep(0.7)
                 exit_mock.assert_called_once_with(0)
+        finally:
+            await client.close()
+
+
+    # ---------- 批量管理:批处理接口 ----------
+    async def _batch_client(self, output_dir, name="batch"):
+        """构造一个显式绑定 output_dir 的独立 app,用于批量接口测试。
+
+        data_dir 必须指向 tempdir:否则 app_settings.json 会落到项目 data/ 下,
+        导致导出目录配置在测试之间互相污染。
+        """
+        data_dir = Path(self.temp.name) / f"{name}-data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        app = create_app(
+            app_dir=APP_DIR,
+            comfy=FakeComfy(),
+            history_path=Path(self.temp.name) / f"{name}-history.sqlite3",
+            custom_prompts_path=Path(self.temp.name) / f"{name}-custom-prompts.json",
+            style_presets_path=Path(self.temp.name) / f"{name}-style-presets.json",
+            anima_tools_dir=Path(self.temp.name) / "tools",
+            output_dir=output_dir,
+            data_dir=data_dir,
+        )
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        return client
+
+    async def _seed_images(self, client, count):
+        """跑 count 个单图批次,返回按 id 倒序的历史记录列表。"""
+        for _ in range(count):
+            response = await client.post(
+                "/api/batches", json={**DEFAULT_SETTINGS, "count": 1}
+            )
+            self.assertEqual(response.status, 201)
+            await client.server.app[MANAGER_KEY].wait()
+        history = await (await client.get("/api/history?page=1&limit=60")).json()
+        return history["items"]
+
+    async def test_batch_delete_removes_files_and_records(self):
+        output_dir = Path(self.temp.name) / "output-batch-delete"
+        output_dir.mkdir()
+        client = await self._batch_client(output_dir, "batch-delete")
+        try:
+            items = await self._seed_images(client, 3)
+            ids = [item["id"] for item in items]
+            # 三张图共用 test.png 文件名,分别落到不同子目录以验证逐条删除。
+            for index, image_id in enumerate(ids):
+                subfolder = output_dir / f"sub{index}"
+                subfolder.mkdir()
+                (subfolder / "test.png").write_bytes(b"png")
+                store = client.server.app[HISTORY_KEY]
+                store.connection.execute(
+                    "UPDATE images SET subfolder = ? WHERE id = ?",
+                    (f"sub{index}", image_id),
+                )
+                store.connection.commit()
+
+            response = await client.post(
+                "/api/history/batch-delete", json={"image_ids": ids}
+            )
+            self.assertEqual(response.status, 200)
+            payload = await response.json()
+            self.assertEqual(payload["deleted"], 3)
+            self.assertEqual(payload["file_deleted"], 3)
+            self.assertEqual(payload["file_missing"], 0)
+            self.assertEqual(payload["requested"], 3)
+            for index in range(3):
+                self.assertFalse((output_dir / f"sub{index}" / "test.png").exists())
+            self.assertEqual(
+                (await (await client.get("/api/history")).json())["total"], 0
+            )
+        finally:
+            await client.close()
+
+    async def test_batch_delete_tolerates_missing_files_and_unknown_ids(self):
+        # 幽灵记录(磁盘无文件)与不存在的 id 都不应阻断整批删除。
+        output_dir = Path(self.temp.name) / "output-batch-delete-missing"
+        output_dir.mkdir()
+        client = await self._batch_client(output_dir, "batch-delete-missing")
+        try:
+            items = await self._seed_images(client, 2)
+            ids = [item["id"] for item in items]
+            response = await client.post(
+                "/api/history/batch-delete", json={"image_ids": [*ids, 999999]}
+            )
+            self.assertEqual(response.status, 200)
+            payload = await response.json()
+            self.assertEqual(payload["deleted"], 2)
+            self.assertEqual(payload["file_deleted"], 0)
+            self.assertEqual(payload["file_missing"], 2)
+            self.assertEqual(
+                (await (await client.get("/api/history")).json())["total"], 0
+            )
+        finally:
+            await client.close()
+
+    async def test_batch_delete_aborts_when_file_is_locked(self):
+        # 任一文件被占用时整批不提交数据库删除,保证磁盘与数据库一致。
+        output_dir = Path(self.temp.name) / "output-batch-delete-locked"
+        output_dir.mkdir()
+        client = await self._batch_client(output_dir, "batch-delete-locked")
+        try:
+            items = await self._seed_images(client, 2)
+            ids = [item["id"] for item in items]
+            physical = output_dir / "test.png"
+            physical.write_bytes(b"png")
+            with mock.patch.object(Path, "unlink", side_effect=PermissionError("locked")):
+                locked = await client.post(
+                    "/api/history/batch-delete", json={"image_ids": ids}
+                )
+            self.assertEqual(locked.status, 500)
+            payload = await locked.json()
+            self.assertIn("无法删除", payload["error"])
+            self.assertEqual(len(payload["failures"]), 2)
+            self.assertTrue(physical.exists())
+            self.assertEqual(
+                (await (await client.get("/api/history")).json())["total"], 2
+            )
+        finally:
+            await client.close()
+
+    async def test_batch_delete_validates_payload(self):
+        client = await self._batch_client(
+            Path(self.temp.name) / "output-batch-delete-invalid", "batch-delete-invalid"
+        )
+        try:
+            for payload in (
+                {},
+                {"image_ids": "1"},
+                {"image_ids": []},
+                {"image_ids": [True]},
+                {"image_ids": ["abc"]},
+                {"image_ids": [0]},
+            ):
+                with self.subTest(payload=payload):
+                    response = await client.post(
+                        "/api/history/batch-delete", json=payload
+                    )
+                    self.assertEqual(response.status, 400)
+        finally:
+            await client.close()
+
+    async def test_batch_export_copies_files_without_overwriting(self):
+        output_dir = Path(self.temp.name) / "output-batch-export"
+        output_dir.mkdir()
+        export_dir = Path(self.temp.name) / "export-batch"
+        client = await self._batch_client(output_dir, "batch-export")
+        try:
+            items = await self._seed_images(client, 2)
+            ids = [item["id"] for item in items]
+            physical = output_dir / "test.png"
+            physical.write_bytes(b"png")
+
+            configured = await client.post(
+                "/api/settings/export-folder", json={"export_dir": str(export_dir)}
+            )
+            self.assertEqual(configured.status, 200)
+
+            first = await client.post(
+                "/api/history/batch-export", json={"image_ids": ids}
+            )
+            self.assertEqual(first.status, 200)
+            payload = await first.json()
+            self.assertTrue(payload["success"])
+            self.assertEqual(payload["exported_count"], 2)
+            self.assertEqual(payload["failed_count"], 0)
+            # 同名源文件:第二份必须递增重命名,绝不覆盖。
+            self.assertEqual(
+                [item["filename"] for item in payload["exported"]],
+                ["test.png", "test_1.png"],
+            )
+            self.assertTrue((export_dir / "test.png").is_file())
+            self.assertTrue((export_dir / "test_1.png").is_file())
+
+            # 再次导出应继续递增,已有文件内容不被覆盖。
+            (export_dir / "test.png").write_bytes(b"original")
+            second = await client.post(
+                "/api/history/batch-export", json={"image_ids": ids}
+            )
+            second_payload = await second.json()
+            self.assertEqual(
+                [item["filename"] for item in second_payload["exported"]],
+                ["test_2.png", "test_3.png"],
+            )
+            self.assertEqual((export_dir / "test.png").read_bytes(), b"original")
+        finally:
+            await client.close()
+
+    async def test_batch_export_reports_missing_sources_and_requires_folder(self):
+        output_dir = Path(self.temp.name) / "output-batch-export-missing"
+        output_dir.mkdir()
+        client = await self._batch_client(output_dir, "batch-export-missing")
+        try:
+            items = await self._seed_images(client, 1)
+            image_id = items[0]["id"]
+
+            # 未配置导出文件夹时返回 400。
+            unset = await client.post(
+                "/api/history/batch-export", json={"image_ids": [image_id]}
+            )
+            self.assertEqual(unset.status, 400)
+            self.assertIn("导出文件夹", (await unset.json())["error"])
+
+            export_dir = Path(self.temp.name) / "export-batch-missing"
+            await client.post(
+                "/api/settings/export-folder", json={"export_dir": str(export_dir)}
+            )
+            # 源文件不存在 + 未知 id:逐条记录失败但不抛 500。
+            response = await client.post(
+                "/api/history/batch-export", json={"image_ids": [image_id, 999999]}
+            )
+            self.assertEqual(response.status, 200)
+            payload = await response.json()
+            self.assertFalse(payload["success"])
+            self.assertEqual(payload["exported_count"], 0)
+            self.assertEqual(payload["failed_count"], 2)
+            self.assertEqual(
+                {item["id"] for item in payload["failures"]}, {image_id, 999999}
+            )
+        finally:
+            await client.close()
+
+    async def test_batch_collections_add_remove_and_set_modes(self):
+        client = await self._batch_client(
+            Path(self.temp.name) / "output-batch-collections", "batch-collections"
+        )
+        try:
+            items = await self._seed_images(client, 2)
+            ids = [item["id"] for item in items]
+            first = await client.post(
+                "/api/gallery/collections", json={"name": "Batch A"}
+            )
+            first_id = (await first.json())["id"]
+            second = await client.post(
+                "/api/gallery/collections", json={"name": "Batch B"}
+            )
+            second_id = (await second.json())["id"]
+
+            added = await client.post(
+                "/api/history/batch-collections",
+                json={"image_ids": ids, "collection_ids": [first_id], "mode": "add"},
+            )
+            self.assertEqual(added.status, 200)
+            added_payload = await added.json()
+            self.assertEqual(added_payload["mode"], "add")
+            self.assertEqual(sorted(added_payload["updated"]), sorted(ids))
+            self.assertEqual(added_payload["updated_count"], 2)
+            listing = await (
+                await client.get(f"/api/history?collection_id={first_id}")
+            ).json()
+            self.assertEqual(listing["total"], 2)
+
+            # add 幂等:重复添加不产生重复成员关系。
+            await client.post(
+                "/api/history/batch-collections",
+                json={"image_ids": ids, "collection_ids": [first_id], "mode": "add"},
+            )
+            self.assertEqual(
+                (await (await client.get(f"/api/history?collection_id={first_id}")).json())["total"],
+                2,
+            )
+
+            # 再追加第二个收藏夹,验证多夹并存。
+            await client.post(
+                "/api/history/batch-collections",
+                json={"image_ids": ids, "collection_ids": [second_id], "mode": "add"},
+            )
+            self.assertEqual(
+                (await (await client.get(f"/api/history?collection_id={second_id}")).json())["total"],
+                2,
+            )
+
+            removed = await client.post(
+                "/api/history/batch-collections",
+                json={"image_ids": ids, "collection_ids": [first_id], "mode": "remove"},
+            )
+            self.assertEqual(removed.status, 200)
+            self.assertEqual((await removed.json())["updated_count"], 2)
+            self.assertEqual(
+                (await (await client.get(f"/api/history?collection_id={first_id}")).json())["total"],
+                0,
+            )
+            self.assertEqual(
+                (await (await client.get(f"/api/history?collection_id={second_id}")).json())["total"],
+                2,
+            )
+
+            # set 全量覆盖:只保留 first_id,second_id 归属被清除。
+            replaced = await client.post(
+                "/api/history/batch-collections",
+                json={"image_ids": ids, "collection_ids": [first_id], "mode": "set"},
+            )
+            self.assertEqual(replaced.status, 200)
+            self.assertEqual((await replaced.json())["updated_count"], 2)
+            self.assertEqual(
+                (await (await client.get(f"/api/history?collection_id={first_id}")).json())["total"],
+                2,
+            )
+            self.assertEqual(
+                (await (await client.get(f"/api/history?collection_id={second_id}")).json())["total"],
+                0,
+            )
+        finally:
+            await client.close()
+
+    async def test_batch_collections_validates_payload_and_rolls_back(self):
+        client = await self._batch_client(
+            Path(self.temp.name) / "output-batch-collections-invalid",
+            "batch-collections-invalid",
+        )
+        try:
+            items = await self._seed_images(client, 1)
+            image_id = items[0]["id"]
+            cases = [
+                ({"image_ids": [image_id], "collection_ids": [1], "mode": "toggle"}, "mode"),
+                ({"image_ids": [image_id], "collection_ids": "1", "mode": "add"}, "collection_ids"),
+                ({"image_ids": [image_id], "collection_ids": [], "mode": "add"}, "collection_ids"),
+                ({"image_ids": [], "collection_ids": [1], "mode": "add"}, "image_ids"),
+                ({"image_ids": [image_id], "collection_ids": [999999], "mode": "add"}, "收藏夹不存在"),
+            ]
+            for payload, text in cases:
+                with self.subTest(payload=payload):
+                    response = await client.post(
+                        "/api/history/batch-collections", json=payload
+                    )
+                    self.assertEqual(response.status, 400)
+                    self.assertIn(text, (await response.json())["error"])
+
+            # 校验失败后不应留下任何成员关系(事务未提交)。
+            self.assertEqual(
+                (await (await client.get("/api/history?collection_id=1")).json())["total"],
+                0,
+            )
+        finally:
+            await client.close()
+
+    async def test_batch_collections_skips_unknown_images(self):
+        client = await self._batch_client(
+            Path(self.temp.name) / "output-batch-collections-unknown",
+            "batch-collections-unknown",
+        )
+        try:
+            items = await self._seed_images(client, 1)
+            image_id = items[0]["id"]
+            response = await client.post(
+                "/api/history/batch-collections",
+                json={"image_ids": [image_id, 999999], "collection_ids": [1], "mode": "add"},
+            )
+            self.assertEqual(response.status, 200)
+            payload = await response.json()
+            self.assertEqual(payload["updated"], [image_id])
+            self.assertEqual(payload["updated_count"], 1)
         finally:
             await client.close()
 

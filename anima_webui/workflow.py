@@ -7,6 +7,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .catalog import is_meta_tag, normalize_text, split_character_tags, split_prompt
+
 
 DEFAULT_QUALITY = "masterpiece, best quality, score_9, score_8, highres, year 2025, newest, safe"
 DEFAULT_NEGATIVE = (
@@ -443,8 +445,10 @@ def validate_settings(overrides: dict[str, Any] | None = None) -> dict[str, Any]
     settings["cfg_zero_star"] = _boolean("cfg_zero_star", settings["cfg_zero_star"])
     settings["second_sampler"] = _validate_second_sampler(settings["second_sampler"])
 
-    if settings["character_detail"] not in {"trigger", "trigger_tags"}:
-        raise WorkflowError("character_detail 必须是 trigger 或 trigger_tags")
+    if settings["character_detail"] not in {"trigger", "trigger_tags", "trigger_appearance"}:
+        raise WorkflowError(
+            "character_detail 必须是 trigger、trigger_tags 或 trigger_appearance"
+        )
 
     settings["manual_artist"] = normalize_artist_tags(settings["manual_artist"])
     for name in (
@@ -1006,7 +1010,8 @@ def render_workflows(
             for item in resolved_selection[section_name]:
                 if not item:
                     continue
-                if section_name == "character" and settings.get("character_detail") == "trigger":
+                detail_mode = settings.get("character_detail", "trigger_tags")
+                if section_name == "character" and detail_mode == "trigger":
                     # 防御性适配:仅触发词模式下优先使用纯触发词,
                     # 避免历史记录中残留的默认服装/外观标签被注入。
                     trigger = item.get("trigger")
@@ -1014,6 +1019,22 @@ def render_workflows(
                         parts.append(", ".join(trigger) if isinstance(trigger, list) else str(trigger))
                     else:
                         parts.append(item.get("prompt", ""))
+                elif section_name == "character" and detail_mode == "trigger_appearance":
+                    # 换装模式:仅注入触发词 + 本体容貌,原设服装交由负面词压制。
+                    trigger = item.get("trigger") or []
+                    trigger_text = ", ".join(trigger) if isinstance(trigger, list) else str(trigger)
+                    appearance = item.get("appearance_tags")
+                    if appearance is None:
+                        appearance, _ = split_character_tags(
+                            item.get("tags") or split_prompt(item.get("prompt"))
+                        )
+                    appearance_text = (
+                        ", ".join(appearance) if isinstance(appearance, list) else str(appearance or "")
+                    )
+                    combined = ", ".join(
+                        part for part in (trigger_text.strip(), appearance_text.strip()) if part
+                    )
+                    parts.append(combined or item.get("prompt", ""))
                 else:
                     parts.append(item.get("prompt") or ", ".join(item.get("tags", [])))
             return ", ".join(filter(None, parts))
@@ -1049,7 +1070,49 @@ def render_workflows(
     positive["background_tags"] = "" if injected_full_prompt else bg_tags
     positive["extra_prompt"] = injected_full_prompt if injected_full_prompt else extra_prompt_text
 
-    api[str(NEGATIVE_ID)]["inputs"]["text"] = frozen_negative_prompt or settings["negative_prompt"]
+    # 换装时的原设服装负向压制:把被剥离的 costume_tags 追加到负面提示词,
+    # 避免"新服装 + 原设服装"双层叠加导致画面撕裂。
+    suppressed_costumes: list[str] = []
+    clothing_active = bool(
+        positive["clothing_tags"]
+        or settings.get("random_clothing")
+        or settings.get("fixed_clothing")
+    )
+    if (
+        clothing_active
+        and settings.get("character_detail") == "trigger_appearance"
+        and resolved_selection
+        and resolved_selection.get("character")
+    ):
+        for item in resolved_selection["character"]:
+            if not item:
+                continue
+            costume_tags = item.get("costume_tags")
+            if costume_tags is None:
+                _, costume_tags = split_character_tags(
+                    item.get("tags") or split_prompt(item.get("prompt"))
+                )
+            suppressed_costumes.extend(costume_tags or [])
+
+    base_negative = frozen_negative_prompt or settings["negative_prompt"]
+    if suppressed_costumes and not injected_full_prompt:
+        existing_negative = {
+            normalize_text(part) for part in split_prompt(base_negative) if normalize_text(part)
+        }
+        added_negatives = [
+            tag
+            for tag in dict.fromkeys(suppressed_costumes)
+            if normalize_text(tag)
+            and normalize_text(tag) not in existing_negative
+            and not is_meta_tag(normalize_text(tag))  # 防御性阻断元标签
+        ]
+        if added_negatives:
+            base_negative = (
+                f"{base_negative}, {', '.join(added_negatives)}"
+                if base_negative.strip()
+                else ", ".join(added_negatives)
+            )
+    api[str(NEGATIVE_ID)]["inputs"]["text"] = base_negative
     api["23"]["inputs"]["value"] = settings["width"]
     api["31"]["inputs"]["value"] = settings["height"]
     api["35"]["inputs"]["value"] = 1

@@ -75,6 +75,54 @@ PRESET_SETTING_KEYS = (
     "pools",
 )
 MAX_PRESETS = 256
+# 内置系统收藏夹:ID 固定为 1,禁止删除或改名,与作品库默认收藏夹语义一致。
+DEFAULT_COLLECTION_ID = 1
+DEFAULT_COLLECTION_NAME = "默认收藏"
+MAX_COLLECTION_NAME = 100
+
+
+def _default_collections() -> list[dict[str, Any]]:
+    """返回内置收藏夹列表的深拷贝,避免调用方误改模块级常量。"""
+    return [{"id": DEFAULT_COLLECTION_ID, "name": DEFAULT_COLLECTION_NAME, "is_default": True}]
+
+
+def _normalize_collections(value: Any) -> list[dict[str, Any]]:
+    """归一化根级 collections:保证默认收藏夹存在、ID 为正整数且唯一、名称非空。"""
+    raw_values = value if isinstance(value, list) else []
+    collections: list[dict[str, Any]] = []
+    seen_ids: set[int] = set()
+    for raw in raw_values:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            collection_id = int(raw.get("id"))
+        except (TypeError, ValueError):
+            continue
+        if collection_id <= 0 or collection_id in seen_ids:
+            continue
+        name = str(raw.get("name") or "").strip()
+        if not name:
+            continue
+        seen_ids.add(collection_id)
+        collections.append(
+            {
+                "id": collection_id,
+                "name": name[:MAX_COLLECTION_NAME],
+                "is_default": collection_id == DEFAULT_COLLECTION_ID,
+            }
+        )
+    default = next(
+        (item for item in collections if item["id"] == DEFAULT_COLLECTION_ID), None
+    )
+    if default is None:
+        collections.insert(0, _default_collections()[0])
+    else:
+        # 默认收藏夹的名称与标记由系统固定,历史数据中的偏差在此纠正。
+        default["name"] = DEFAULT_COLLECTION_NAME
+        default["is_default"] = True
+    # 默认收藏夹始终排在最前,其余保持原有顺序。
+    collections.sort(key=lambda item: (item["id"] != DEFAULT_COLLECTION_ID, item["id"]))
+    return collections
 
 
 def preset_settings(
@@ -105,6 +153,7 @@ class StylePresetStore:
         self.thumbnail_dir = self.path.parent / "preset_thumbnails"
         self.thumbnail_dir.mkdir(parents=True, exist_ok=True)
         self.items: list[dict[str, Any]] = []
+        self.collections: list[dict[str, Any]] = _default_collections()
         self.load_warnings: list[str] = []
         self._lock = asyncio.Lock()
         self.reload()
@@ -113,10 +162,15 @@ class StylePresetStore:
         self.load_warnings = []
         if not self.path.is_file():
             self.items = []
+            self.collections = _default_collections()
             return
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
             values = payload.get("items", []) if isinstance(payload, dict) else []
+            raw_collections = payload.get("collections") if isinstance(payload, dict) else None
+            # 先归一化收藏夹,再归一化预设:预设的 collection_ids 需要按合法分类裁剪。
+            collections = _normalize_collections(raw_collections)
+            self.collections = collections
             items = [self._normalize(item, existing=True) for item in values if isinstance(item, dict)]
         except (OSError, json.JSONDecodeError, WorkflowError) as error:
             # 坏文件不再阻断启动:改名备份后以空数据继续,并向界面报告警告。
@@ -124,21 +178,21 @@ class StylePresetStore:
             logger.warning("风格预设文件无法读取(%s),已备份为 %s 并以空数据启动", error, backup.name)
             self.load_warnings.append(f"风格预设文件无法读取,已备份为 {backup.name} 并以空数据启动")
             self.items = []
+            self.collections = _default_collections()
             return
         self.items = items
 
-    def list(self) -> dict[str, Any]:
-        favorites = sorted(
-            (item for item in self.items if item["favorite"]),
-            key=lambda item: item["updated_at"],
-            reverse=True,
-        )
-        regular = sorted(
-            (item for item in self.items if not item["favorite"]),
-            key=lambda item: item["updated_at"],
-            reverse=True,
-        )
-        return {"items": copy.deepcopy(favorites + regular), "count": len(self.items)}
+    def list(self, collection_id: int | None = None) -> dict[str, Any]:
+        """返回预设列表,统一按 updated_at 倒序。
+
+        加星仅作为分类标识,不再影响排序;传入 collection_id 时只返回
+        归属该收藏夹的预设,count 仍为全库总数。
+        """
+        items = self.items
+        if collection_id is not None and collection_id > 0:
+            items = [item for item in items if collection_id in item["collection_ids"]]
+        ordered = sorted(items, key=lambda item: item["updated_at"], reverse=True)
+        return {"items": copy.deepcopy(ordered), "count": len(self.items)}
 
     @_locked
     async def create(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -166,15 +220,18 @@ class StylePresetStore:
         if "name" in payload:
             self._ensure_unique_name(payload.get("name"), excluding_id=preset_id)
         current = self.items[index]
-        item = self._normalize(
-            {
-                **current,
-                **payload,
-                "id": preset_id,
-                "created_at": current["created_at"],
-                "updated_at": self._now(),
-            }
-        )
+        merged = {
+            **current,
+            **payload,
+            "id": preset_id,
+            "created_at": current["created_at"],
+            "updated_at": self._now(),
+        }
+        # 载荷显式给出 favorite 而未给出 collection_ids 时,以 favorite 为准,
+        # 避免继承自旧记录的 collection_ids 覆盖调用方意图。
+        if "favorite" in payload and "collection_ids" not in payload:
+            merged.pop("collection_ids", None)
+        item = self._normalize(merged)
         self.items[index] = item
         await self._save()
         return copy.deepcopy(item)
@@ -191,6 +248,29 @@ class StylePresetStore:
             thumb_path.unlink(missing_ok=True)
         await self._save()
         return True
+
+    @_locked
+    async def delete_batch(self, preset_ids: list[str]) -> int:
+        """批量删除预设,并同步清理磁盘上的缩略图文件。
+
+        单次写盘完成全部删除,避免逐条 _save 造成的多次 fsync;
+        不存在的 ID 静默跳过,保证接口幂等。
+        """
+        target_ids = {str(value) for value in preset_ids if str(value or "").strip()}
+        if not target_ids:
+            return 0
+        to_delete = [item for item in self.items if item["id"] in target_ids]
+        if not to_delete:
+            return 0
+        # 内存列表过滤
+        self.items = [item for item in self.items if item["id"] not in target_ids]
+        # 同步物理删除对应的缩略图文件,避免孤儿文件残留
+        for item in to_delete:
+            thumb = self.thumbnail_dir / f"{item['id']}.png"
+            if thumb.is_file():
+                thumb.unlink(missing_ok=True)
+        await self._save()
+        return len(to_delete)
 
     @_locked
     async def save_thumbnail(self, preset_id: str, image_bytes: bytes) -> Path:
@@ -248,15 +328,46 @@ class StylePresetStore:
         updated_at = str(payload.get("updated_at") or created_at)
         if existing and not created_at:
             created_at = updated_at = StylePresetStore._now()
+        collection_ids = self._normalize_collection_ids(payload, favorite)
+        # 双向同步:collection_ids 含默认收藏夹即视为加星,反之亦然。
+        favorite = DEFAULT_COLLECTION_ID in collection_ids
         return {
             "id": preset_id,
             "name": name,
             "favorite": favorite,
+            "collection_ids": collection_ids,
             "settings": preset_settings(payload.get("settings"), self.prompt_rules),
             "thumbnail_url": self.thumbnail_url(preset_id),
             "created_at": created_at,
             "updated_at": updated_at,
         }
+
+    def _normalize_collection_ids(self, payload: dict[str, Any], favorite: bool) -> list[int]:
+        """归一化预设的 collection_ids,并兼容仅有 favorite 的历史数据。
+
+        - 历史数据只有 favorite=True 而无 collection_ids 时,自动补 [1];
+        - 传入的 ID 必须存在于当前收藏夹,非法值静默丢弃;
+        - 结果去重并升序,保证持久化稳定。
+        """
+        valid_ids = {collection["id"] for collection in self.collections}
+        raw_ids = payload.get("collection_ids")
+        if isinstance(raw_ids, list):
+            collection_ids: list[int] = []
+            for raw in raw_ids:
+                if isinstance(raw, bool):
+                    continue
+                try:
+                    collection_id = int(raw)
+                except (TypeError, ValueError):
+                    continue
+                if collection_id in valid_ids and collection_id not in collection_ids:
+                    collection_ids.append(collection_id)
+        else:
+            # 无 collection_ids 字段:由 favorite 推导,保证老数据平滑迁移。
+            collection_ids = [DEFAULT_COLLECTION_ID] if favorite else []
+        if favorite and DEFAULT_COLLECTION_ID not in collection_ids:
+            collection_ids.append(DEFAULT_COLLECTION_ID)
+        return sorted(collection_ids)
 
     def thumbnail_url(self, preset_id: str) -> str | None:
         """本地缩略图存在时返回静态资源 URL,否则返回 None。
@@ -271,9 +382,166 @@ class StylePresetStore:
         """返回预设缩略图的物理路径(不保证存在)。"""
         return self.thumbnail_dir / f"{preset_id}.png"
 
+    # ---------- 收藏夹(分类)管理 ----------
+    def list_collections(self) -> dict[str, Any]:
+        """返回全库总数与各收藏夹的预设数量统计。"""
+        collections = [
+            {
+                **collection,
+                "count": sum(
+                    collection["id"] in item["collection_ids"] for item in self.items
+                ),
+            }
+            for collection in self.collections
+        ]
+        return {"all_total": len(self.items), "collections": copy.deepcopy(collections)}
+
+    @_locked
+    async def create_collection(self, name: str) -> dict[str, Any]:
+        cleaned = str(name or "").strip()
+        if not cleaned:
+            raise WorkflowError("收藏夹名称不能为空")
+        if len(cleaned) > MAX_COLLECTION_NAME:
+            raise WorkflowError(f"收藏夹名称不能超过 {MAX_COLLECTION_NAME} 个字符")
+        if any(
+            collection["name"].strip().casefold() == cleaned.casefold()
+            for collection in self.collections
+        ):
+            raise WorkflowError(f"收藏夹已存在: {cleaned}")
+        # 自增分配:取现有最大 ID + 1,保证唯一正整数且不复用已删除的 ID。
+        next_id = max((collection["id"] for collection in self.collections), default=0) + 1
+        collection = {"id": next_id, "name": cleaned, "is_default": False}
+        self.collections.append(collection)
+        await self._save()
+        return copy.deepcopy(collection)
+
+    @_locked
+    async def delete_collection(self, collection_id: int) -> bool:
+        """删除自定义收藏夹,仅从预设中解绑,绝不删除预设本体。"""
+        if collection_id == DEFAULT_COLLECTION_ID:
+            raise WorkflowError("默认收藏夹不能删除")
+        previous = len(self.collections)
+        self.collections = [
+            collection for collection in self.collections if collection["id"] != collection_id
+        ]
+        if len(self.collections) == previous:
+            return False
+        for item in self.items:
+            if collection_id in item["collection_ids"]:
+                item["collection_ids"] = [
+                    value for value in item["collection_ids"] if value != collection_id
+                ]
+                item["favorite"] = DEFAULT_COLLECTION_ID in item["collection_ids"]
+        await self._save()
+        return True
+
+    @_locked
+    async def toggle_default_favorite(self, preset_id: str) -> dict[str, Any]:
+        item = next((entry for entry in self.items if entry["id"] == preset_id), None)
+        if item is None:
+            raise KeyError(preset_id)
+        if DEFAULT_COLLECTION_ID in item["collection_ids"]:
+            item["collection_ids"] = [
+                value for value in item["collection_ids"] if value != DEFAULT_COLLECTION_ID
+            ]
+            is_favorite = False
+        else:
+            item["collection_ids"] = sorted([*item["collection_ids"], DEFAULT_COLLECTION_ID])
+            is_favorite = True
+        item["favorite"] = is_favorite
+        # 星标仅作分类标识,不刷新 updated_at,避免切换收藏改变列表排序。
+        await self._save()
+        return {
+            "id": preset_id,
+            "is_favorite": is_favorite,
+            "collection_ids": list(item["collection_ids"]),
+        }
+
+    @_locked
+    async def set_preset_collections(
+        self, preset_id: str, collection_ids: list[int]
+    ) -> dict[str, Any]:
+        item = next((entry for entry in self.items if entry["id"] == preset_id), None)
+        if item is None:
+            raise KeyError(preset_id)
+        if not isinstance(collection_ids, list):
+            raise WorkflowError("collection_ids 必须是数组")
+        valid_ids = {collection["id"] for collection in self.collections}
+        wanted: list[int] = []
+        for raw in collection_ids:
+            if isinstance(raw, bool):
+                raise WorkflowError("collection_ids 必须是整数数组")
+            try:
+                collection_id = int(raw)
+            except (TypeError, ValueError):
+                raise WorkflowError("collection_ids 必须是整数数组")
+            if collection_id not in valid_ids:
+                raise WorkflowError(f"收藏夹不存在: {collection_id}")
+            if collection_id not in wanted:
+                wanted.append(collection_id)
+        item["collection_ids"] = sorted(wanted)
+        item["favorite"] = DEFAULT_COLLECTION_ID in item["collection_ids"]
+        item["updated_at"] = self._now()
+        await self._save()
+        return copy.deepcopy(item)
+
+    @_locked
+    async def batch_update_collections(
+        self, preset_ids: list[str], collection_ids: list[int], mode: str
+    ) -> list[str]:
+        """批量调整预设所属分类,支持 add / remove / set 模式。
+
+        - add:在原有归属上追加;
+        - remove:从原有归属中移除;
+        - set:整体覆盖为给定归属。
+        星标(favorite)始终由是否包含默认收藏夹推导,保证双向同步。
+        非法/不存在的分类 ID 静默丢弃,避免整批失败。
+        """
+        if mode not in {"add", "remove", "set"}:
+            raise WorkflowError("mode 必须是 add、remove 或 set")
+        valid_ids = {collection["id"] for collection in self.collections}
+        wanted: list[int] = []
+        for raw in collection_ids:
+            if isinstance(raw, bool):
+                continue
+            try:
+                collection_id = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if collection_id in valid_ids and collection_id not in wanted:
+                wanted.append(collection_id)
+
+        target_ids = {str(value) for value in preset_ids if str(value or "").strip()}
+        updated: list[str] = []
+        now = self._now()
+
+        for item in self.items:
+            if item["id"] not in target_ids:
+                continue
+            current_ids = set(item.get("collection_ids") or [])
+            if mode == "add":
+                new_ids = current_ids | set(wanted)
+            elif mode == "remove":
+                new_ids = current_ids - set(wanted)
+            else:  # set 模式
+                new_ids = set(wanted)
+
+            item["collection_ids"] = sorted(new_ids)
+            item["favorite"] = DEFAULT_COLLECTION_ID in new_ids
+            item["updated_at"] = now
+            updated.append(item["id"])
+
+        if updated:
+            await self._save()
+        return updated
+
     async def _save(self) -> None:
         # 快照序列化在事件循环线程完成(状态一致),fsync 等慢速 I/O 移入工作线程。
-        payload = json.dumps({"version": 1, "items": self.items}, ensure_ascii=False, indent=2) + "\n"
+        payload = json.dumps(
+            {"version": 1, "collections": self.collections, "items": self.items},
+            ensure_ascii=False,
+            indent=2,
+        ) + "\n"
         await asyncio.to_thread(self._write_text, payload)
 
     def _write_text(self, text: str) -> None:

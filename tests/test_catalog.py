@@ -463,5 +463,65 @@ class CatalogTests(unittest.IsolatedAsyncioTestCase):
             validate_settings({**DEFAULT_SETTINGS, "female_count": 4, "male_count": 2})
 
 
+def test_split_character_tags_meta_filtering():
+    """验证元标签被剔除，既不进入外观也不进入服装"""
+    from anima_webui.catalog import split_character_tags
+
+    tags = [
+        "1girl", "2girls", "solo", "honkai (series)",
+        "white shirt", "black jacket", "grey hair"
+    ]
+    appearance, costume = split_character_tags(tags)
+
+    assert "1girl" not in appearance and "1girl" not in costume
+    assert "2girls" not in appearance and "2girls" not in costume
+    assert "solo" not in appearance and "solo" not in costume
+    assert "honkai (series)" not in appearance and "honkai (series)" not in costume
+    assert appearance == ["grey hair"]
+    assert costume == ["white shirt", "black jacket"]
+
+
+def test_split_character_tags_hair_accessories():
+    """验证标志性发饰不被服装词误杀，正常保留在外观池"""
+    from anima_webui.catalog import split_character_tags
+
+    tags = [
+        "black hairband", "hair ribbon", "hair bow", "butterfly hair clip",
+        "hair tie", "red ribbon", "bow tie"
+    ]
+    appearance, costume = split_character_tags(tags)
+
+    # 发饰 -> 外观
+    assert "black hairband" in appearance
+    assert "hair ribbon" in appearance
+    assert "hair bow" in appearance
+    assert "butterfly hair clip" in appearance
+    assert "hair tie" in appearance
+
+    # 独立服装丝带/领结 -> 服装
+    assert "red ribbon" in costume
+    assert "bow tie" in costume
+
+
+def test_firefly_actual_payload_regression():
+    """回归验证流萤真实 Payload 分流准确性"""
+    from anima_webui.catalog import split_character_tags
+
+    firefly_tags = [
+        "1girl", "hair between eyes", "purple eyes", "grey hair",
+        "long hair", "black hairband", "hair intakes",
+        "white shirt", "black jacket", "long sleeves"
+    ]
+    appearance, costume = split_character_tags(firefly_tags)
+
+    assert "1girl" not in appearance
+    assert "1girl" not in costume
+    assert appearance == [
+        "hair between eyes", "purple eyes", "grey hair",
+        "long hair", "black hairband", "hair intakes"
+    ]
+    assert costume == ["white shirt", "black jacket", "long sleeves"]
+
+
 if __name__ == "__main__":
     unittest.main()

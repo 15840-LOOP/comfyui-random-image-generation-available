@@ -14,7 +14,7 @@
       document.documentElement.dataset.theme = theme;
     })();
   </script>
-  <link rel="stylesheet" href="/static/styles.css?v=20261015-preset-phase5">
+  <link rel="stylesheet" href="/static/styles.css?v=20261017-collections-align-fix">
 </head>
 <body>
   <div class="ambient" aria-hidden="true"></div>
@@ -56,7 +56,7 @@
         <section class="control-section">
           <div class="section-heading"><h2>提示词池</h2><span id="poolOverview">0 项已选</span></div>
           <div id="dimensionList" class="dimension-list"></div>
-          <label class="field"><span>角色标签</span><select id="character_detail"><option value="trigger_tags">触发词 + 特征</option><option value="trigger">仅触发词</option></select></label>
+          <label class="field"><span>角色标签</span><select id="character_detail"><option value="trigger_appearance" selected>触发词 + 容貌 (换装推荐)</option><option value="trigger_tags">触发词 + 全部特征 (原设)</option><option value="trigger">仅触发词</option></select></label>
           <label class="field"><span>固定画师</span><input id="manual_artist" type="text" placeholder="例如 @anmi, @rella" autocomplete="off" spellcheck="false"></label>
           <details class="artist-favorites-section">
             <summary><span>收藏画师</span><span id="artistFavoriteCount" class="summary-value">0 位</span><i>+</i></summary>
@@ -152,7 +152,37 @@
       <div id="galleryViewContainer" class="view-container" role="tabpanel" aria-labelledby="tabBtnGallery">
         <div class="history-header">
           <div><span class="kicker">GENERATED ARCHIVE</span><h1>作品库</h1><p id="historyCount">0 张图片</p></div>
-          <div class="pager"><button id="prevPage" class="icon-button" type="button" title="上一页" aria-label="上一页">‹</button><span id="pageLabel">1 / 1</span><button id="nextPage" class="icon-button" type="button" title="下一页" aria-label="下一页">›</button></div>
+          <div class="history-actions">
+            <div class="export-folder-widget">
+              <button id="btnSetExportFolder" class="export-folder-capsule" type="button" title="点击设置快捷复制的目标文件夹">
+                <svg class="capsule-folder-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                </svg>
+                <span id="exportFolderLabel">设置导出目录</span>
+              </button>
+              <button id="btnOpenExportFolder" class="icon-button compact-icon-btn" type="button" title="打开导出文件夹" aria-label="打开导出文件夹" hidden>
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                  <polyline points="15 3 21 3 21 9"></polyline>
+                  <line x1="10" y1="14" x2="21" y2="3"></line>
+                </svg>
+              </button>
+            </div>
+            <button id="btnToggleBatchMode" class="batch-mode-toggle" type="button" aria-pressed="false" title="批量管理作品">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M9 11l3 3L22 4"></path>
+                <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
+              </svg>
+              <span>批量管理</span>
+            </button>
+            <div class="pager"><button id="prevPage" class="icon-button" type="button" title="上一页" aria-label="上一页">‹</button><span id="pageLabel">1 / 1</span><button id="nextPage" class="icon-button" type="button" title="下一页" aria-label="下一页">›</button></div>
+          </div>
+        </div>
+        <div class="collections-bar-wrapper">
+          <nav id="galleryCollectionsBar" class="gallery-collections-bar collections-scroll-track" aria-label="作品库分类过滤"></nav>
+          <div class="collections-fixed-actions">
+            <button id="btnGalleryAddCollection" class="collection-pill pill-add" type="button" title="新建收藏夹" aria-label="新建收藏夹">＋ 新建</button>
+          </div>
         </div>
         <div id="gallery" class="gallery" aria-live="polite"></div>
         <div id="emptyState" class="empty-state"><span class="empty-mark">A</span><strong>等待第一张作品</strong><small>完成生成后会出现在这里</small></div>
@@ -167,7 +197,21 @@
               <span id="presetPageLabel">1 / 1</span>
               <button id="presetNextPage" class="icon-button" type="button" title="下一页" aria-label="下一页">›</button>
             </div>
+            <!-- 预设库批量管理切换:与作品库 #btnToggleBatchMode 保持同一视觉语言 -->
+            <button id="btnTogglePresetBatchMode" class="batch-mode-toggle" type="button" aria-pressed="false" title="批量管理预设">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M9 11l3 3L22 4"></path>
+                <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
+              </svg>
+              <span>批量管理</span>
+            </button>
             <button id="btnCreatePreset" class="button primary" type="button"><span aria-hidden="true">+</span> 新建预设</button>
+          </div>
+        </div>
+        <div class="collections-bar-wrapper">
+          <nav id="presetCollectionsBar" class="collections-bar collections-scroll-track" aria-label="预设库分类过滤"></nav>
+          <div class="collections-fixed-actions">
+            <button id="btnPresetAddCollection" class="collection-pill pill-add" type="button" title="新建分类" aria-label="新建分类">＋ 新建</button>
           </div>
         </div>
         <div id="presetError" class="field-error" role="status" hidden></div>
@@ -177,7 +221,7 @@
     </section>
   </main>
 
-  <div class="command-deck glass" role="group" aria-label="生成控制">
+  <div id="commandDeck" class="command-deck glass" role="group" aria-label="生成控制">
     <img id="livePreview" class="live-preview" alt="实时预览" hidden>
     <label class="quantity-field"><span>批次数量</span><input id="count" form="settingsForm" type="number" min="1" max="1000" step="1" required></label>
     <div class="batch-summary" aria-live="polite">
@@ -456,6 +500,16 @@
     </form>
   </dialog>
 
+  <dialog id="presetCollectionsDialog" class="compact-dialog">
+    <form id="presetCollectionsForm" method="dialog">
+      <div class="dialog-heading"><div><span class="kicker">PRESET COLLECTIONS</span><h2>归类预设</h2></div><button id="closePresetCollections" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button></div>
+      <p id="presetCollectionsSummary" class="import-hint"></p>
+      <div id="presetCollectionsChecklist" class="favorite-groups"></div>
+      <div id="presetCollectionsError" class="field-error" role="alert" hidden></div>
+      <div class="dialog-actions"><span></span><span></span><button id="cancelPresetCollections" class="button ghost" type="button">取消</button><button class="button primary" type="submit">保存归类</button></div>
+    </form>
+  </dialog>
+
   <dialog id="presetDeleteDialog" class="compact-dialog">
     <form id="presetDeleteForm" method="dialog">
       <div class="dialog-heading"><div><span class="kicker">DELETE PRESET</span><h2>删除预设</h2></div><button id="closePresetDelete" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button></div>
@@ -465,10 +519,32 @@
     </form>
   </dialog>
 
+  <dialog id="recordDeleteDialog" class="compact-dialog record-delete-dialog">
+    <form id="recordDeleteForm" method="dialog">
+      <div class="dialog-heading"><div><span class="kicker">DELETE ARCHIVE</span><h2>删除作品</h2></div><button id="closeRecordDelete" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button></div>
+      <p id="recordDeleteSummary" class="delete-group-summary"></p>
+      <p class="record-delete-warning">⚠️ 确定要删除该作品吗？此操作将同步永久删除本地物理图片文件，不可撤销。</p>
+      <div id="recordDeleteError" class="field-error" role="alert" hidden></div>
+      <div class="dialog-actions"><span></span><span></span><button id="cancelRecordDelete" class="button ghost" type="button">取消</button><button id="confirmRecordDelete" class="button danger" type="submit">确认删除</button></div>
+    </form>
+  </dialog>
+
   <dialog id="detailDialog" class="detail-dialog">
     <button id="closeDialog" class="dialog-close" type="button" title="关闭" aria-label="关闭">×</button>
+
+    <!-- 详情页左右常态翻页按钮 -->
+    <button id="detailPrevious" class="detail-flank-nav previous" type="button" title="上一张作品 (←)" aria-label="上一张作品">
+      <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"></polyline></svg>
+    </button>
+    <button id="detailNext" class="detail-flank-nav next" type="button" title="下一张作品 (→)" aria-label="下一张作品">
+      <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"></polyline></svg>
+    </button>
+
     <div class="detail-layout">
-      <figure><img id="detailImage" tabindex="0" role="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="imagePreviewDialog" aria-label="展开全尺寸图片预览" title="点击查看全尺寸图片" alt="生成结果"></figure>
+      <figure class="detail-figure">
+        <img id="detailImage" tabindex="0" role="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="imagePreviewDialog" aria-label="展开全尺寸图片预览" title="点击查看全尺寸图片" alt="生成结果">
+        <span id="detailNavStatus" class="sr-only" role="status" aria-live="polite"></span>
+      </figure>
       <div class="detail-copy">
         <span id="detailMeta" class="kicker"></span>
         <h2>生成详情</h2>
@@ -536,7 +612,13 @@
           </fieldset>
           <div class="regeneration-footer"><label class="regeneration-count"><span>生成数量</span><input id="variantDrawerCount" type="number" min="1" max="100" value="4"></label><button id="confirmVariant" class="button primary" type="button" disabled>生成同提示词变体</button></div>
         </section>
-        <div class="dialog-actions"><button id="restoreSettings" class="button primary" type="button">载入设置</button><button id="openFolder" class="button" type="button" title="在文件资源管理器中定位该图片">定位文件</button><button id="deleteRecord" class="button danger" type="button">删除记录</button></div>
+        <div class="dialog-actions detail-footer-actions">
+          <button id="restoreSettings" class="button primary" type="button">载入设置</button>
+          <button id="openFolder" class="button secondary" type="button" title="在文件资源管理器中定位该图片">定位文件</button>
+          <button id="quickExportImage" class="button secondary" type="button" title="快捷复制到指定文件夹 (快捷键 C)">快捷复制</button>
+          <button id="detailManageCollections" class="button secondary" type="button" title="管理此作品的收藏归属">收藏至...</button>
+          <button id="deleteRecord" class="button danger" type="button">删除记录</button>
+        </div>
       </div>
     </div>
   </dialog>
@@ -555,7 +637,51 @@
     </div>
   </dialog>
 
+  <dialog id="imageCollectionsDialog" class="compact-dialog">
+    <form id="imageCollectionsForm" method="dialog">
+      <div class="dialog-heading">
+        <div>
+          <span class="kicker">COLLECTIONS</span>
+          <h2>添加到收藏夹</h2>
+        </div>
+        <button id="closeImageCollections" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button>
+      </div>
+      <p class="import-hint">勾选此作品加入的收藏夹，可同时归入多个分类：</p>
+      <div id="imageCollectionsChecklist" class="favorite-groups"></div>
+      <div class="favorite-selection-create">
+        <label class="field"><span>新建收藏夹</span><input id="newCollectionNameInput" type="text" maxlength="50" placeholder="收藏夹名称"></label>
+        <button id="btnCreateAndCheckCollection" class="button ghost compact" type="button">新建并勾选</button>
+      </div>
+      <div id="imageCollectionsError" class="field-error" role="alert" hidden></div>
+      <div id="imageCollectionsBatchWarning" class="image-collections-batch-warning" role="alert" hidden>
+        ⚠️ 未勾选任何收藏夹，保存后将移出全部收藏
+      </div>
+      <div class="dialog-actions">
+        <span></span><span></span>
+        <button id="cancelImageCollections" class="button ghost" type="button">取消</button>
+        <button id="saveImageCollections" class="button primary" type="submit">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="batchActionBar" class="batch-action-bar glass" role="toolbar" aria-label="批量操作" aria-hidden="true" hidden>
+    <div class="batch-bar-count" aria-live="polite">
+      <span class="batch-bar-count-value" id="batchSelectedCount">0</span>
+      <span class="batch-bar-count-label">已选</span>
+    </div>
+    <div class="batch-bar-divider" aria-hidden="true"></div>
+    <div class="batch-bar-actions">
+      <button id="batchSelectAll" class="button ghost compact" type="button" title="选中本页全部作品">全选本页</button>
+      <button id="batchClearSelection" class="button ghost compact" type="button" title="清空已选作品">清空</button>
+      <button id="batchExport" class="button secondary compact" type="button" title="导出已选作品到导出目录">批量导出</button>
+      <button id="batchFavorite" class="button secondary compact" type="button" title="将已选作品加入默认收藏">批量收藏</button>
+      <button id="batchDelete" class="button danger compact" type="button" title="删除已选作品">批量删除</button>
+    </div>
+    <div class="batch-bar-divider" aria-hidden="true"></div>
+    <button id="batchExit" class="icon-button batch-bar-exit" type="button" title="退出批量管理" aria-label="退出批量管理">×</button>
+  </div>
+
   <div id="toast" role="status" aria-live="polite"></div>
-  <script src="/static/app.js?v=20261015-preset-phase5" defer></script>
+  <script src="/static/app.js?v=20261017-preset-batch-mode" defer></script>
 </body>
 </html>

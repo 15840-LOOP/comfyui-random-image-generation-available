@@ -96,6 +96,99 @@ def normalize_text(value: Any) -> str:
     return " ".join(str(value or "").strip().lower().replace("_", " ").split())
 
 
+# -------------------------------------------------------------------------
+# Danbooru 角色特征形态学分类器：分离【本体容貌】与【原装服饰/剪裁/配件】
+# -------------------------------------------------------------------------
+HAIR_ROOTS = {
+    "hair", "bangs", "ponytail", "twintails", "braid", "braids", "bun", "buns",
+    "sidelocks", "ahoge", "cowlick", "hime cut", "bob cut", "drills", "intakes",
+    "flaps", "forehead", "hairband",
+}
+
+EYE_FACE_ROOTS = {
+    "eyes", "eye", "pupil", "pupils", "heterochromia", "sclera",
+    "fangs", "sharp teeth", "mole", "freckles", "blush", "pointy ears",
+    "elf ears", "animal ears", "cat ears", "fox ears", "bunny ears", "wolf ears",
+    "dog ears", "horns", "horn", "halo",
+}
+
+BODY_ROOTS = {
+    "breasts", "chest", "navel", "thighs", "skin", "tan", "tail", "wings",
+    "collarbone", "abs",
+}
+
+CLOTHING_EXCLUDE = {
+    "dress", "jacket", "shirt", "skirt", "pants", "shorts", "suit", "uniform",
+    "coat", "boots", "shoes", "gloves", "socks", "stockings", "thighhighs",
+    "pantyhose", "sleeves", "ascot", "tie", "ribbon", "bow", "collar", "choker",
+    "hat", "cap", "beret", "hood", "cape", "cloak", "cutout", "belt", "apron",
+    "swimsuit", "bikini", "underwear", "bra", "panties", "leotard", "armor",
+    "bare shoulders", "detached sleeves", "long sleeves", "short sleeves",
+}
+
+HAIR_ACCESSORY_WORDS = {"hairband", "hairpin", "hairclip", "scrunchie"}
+
+
+def is_meta_tag(tag: str) -> bool:
+    """判定是否为 Danbooru 人数、性别、画面属性与作品系列元标签"""
+    import re
+    return (
+        tag in PERSON_TAGS
+        or bool(re.match(r"^\d+(?:girls?|boys?|others?|people|persons?)$", tag))
+        or "(series)" in tag
+    )
+
+
+def is_hair_accessory(tag: str) -> bool:
+    """判定是否为角色标志性发饰/头部饰品，避免被服装排除词误杀"""
+    return any(acc in tag for acc in HAIR_ACCESSORY_WORDS) or (
+        "hair" in tag and any(
+            w in tag for w in ("ribbon", "bow", "clip", "pin", "band", "ornament", "flower", "tie")
+        )
+    )
+
+
+def split_character_tags(tags: list[str]) -> tuple[list[str], list[str]]:
+    """
+    将角色的 tags 列表分离为:
+    - appearance_tags: 纯身体/面容/发型特征（换装时保留）
+    - costume_tags: 原版服装/剪裁/配件（换装时剔除并推入负面）
+    """
+    import re
+
+    appearance: list[str] = []
+    costume: list[str] = []
+    for raw_tag in tags:
+        tag = normalize_text(raw_tag)
+        if not tag:
+            continue
+
+        # 守卫 1: 过滤元标签与人数词，既不进外观，也绝不进服装
+        if is_meta_tag(tag):
+            continue
+
+        # 守卫 2: 优先捕获发饰，避免被后续服装词(ribbon/bow等)拦截
+        if is_hair_accessory(tag):
+            appearance.append(raw_tag)
+            continue
+
+        words = set(re.findall(r"[a-z]+", tag))
+        # 拦截明确的服装词根与剪裁词（如 navel cutout 虽含 navel，但因 cutout 判定为服装）
+        if (words & CLOTHING_EXCLUDE) or (tag in CLOTHING_EXCLUDE):
+            costume.append(raw_tag)
+            continue
+        # 命中发型、面容眼瞳或身体特征词根
+        if (
+            any(h in tag for h in HAIR_ROOTS)
+            or any(e in tag for e in EYE_FACE_ROOTS)
+            or any(b in tag for b in BODY_ROOTS)
+        ):
+            appearance.append(raw_tag)
+        else:
+            costume.append(raw_tag)
+    return appearance, costume
+
+
 def split_prompt(value: Any) -> list[str]:
     if isinstance(value, list):
         parts: list[str] = []
@@ -274,6 +367,10 @@ class PromptCatalog:
             tags = split_prompt(official.get("tags"))
             if not tags:
                 tags = [str(item.get("gender"))] if item.get("gender") else []
+
+            # 分离本体容貌特征与原设服装，供换装分流与负向压制使用
+            appearance_tags, costume_tags = split_character_tags(tags)
+
             title_zh = CHARACTER_ZH.get(raw_name.casefold(), "")
             subtitle_zh = SERIES_ZH.get(copyright_name.casefold(), "")
             return {
@@ -289,6 +386,8 @@ class PromptCatalog:
                 "prompt": ", ".join(split_prompt(trigger) + tags),
                 "trigger": split_prompt(trigger),
                 "tags": tags,
+                "appearance_tags": appearance_tags,
+                "costume_tags": costume_tags,
                 "gender": str(item.get("gender") or "unknown"),
                 "hair": str(item.get("hair") or ""),
                 "eye": str(item.get("eye") or ""),
@@ -530,6 +629,12 @@ class PromptCatalog:
             values = split_prompt(item.get("trigger"))
             if character_detail == "trigger_tags":
                 values.extend(split_prompt(item.get("tags")))
+            elif character_detail == "trigger_appearance":
+                # 换装模式：仅追加本体容貌特征，剥离原设服装
+                appearance = item.get("appearance_tags")
+                if appearance is None:
+                    appearance, _ = split_character_tags(split_prompt(item.get("tags")))
+                values.extend(appearance)
         else:
             values = split_prompt(item.get("tags") or item.get("prompt"))
         if strip_person_tags:
@@ -637,11 +742,13 @@ class PromptCatalog:
             "prompt", "gender",
             "hair", "eye", "copyright", "post_count", "preview", "categories", "traits",
             "conflict_slots", "source", "builtin",
-            "group_ids",
+            "group_ids", "appearance_tags", "costume_tags",
         )
         result = {key: item.get(key) for key in keys}
         result["tags"] = item.get("tags") or []
         result["trigger"] = item.get("trigger") or []
+        result["appearance_tags"] = item.get("appearance_tags") or []
+        result["costume_tags"] = item.get("costume_tags") or []
         return result
 
     def get(self, item_id: str) -> dict[str, Any] | None:

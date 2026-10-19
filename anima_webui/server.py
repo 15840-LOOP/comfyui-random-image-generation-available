@@ -6,6 +6,7 @@ import hmac
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -20,8 +21,9 @@ from .comfy import ComfyClient, ComfyError
 from .catalog import CatalogError, PromptCatalog, SECTIONS, resolve_output_dir
 from .custom_prompts import CustomPromptStore
 from .favorites import FavoritesService, favorite_key
-from .history import HistoryStore
+from .history import CollectionError, HistoryStore
 from .lora_triggers import LoraTriggerOverrideStore
+from .persistence import load_app_settings, save_app_settings
 from .prompt_rules import PromptRuleStore
 from .runner import BatchConflict, BatchManager
 from .style_presets import StylePresetStore
@@ -78,6 +80,8 @@ async def error_middleware(request: web.Request, handler: Any) -> web.StreamResp
         response = await handler(request)
     except WorkflowError as error:
         return web.json_response({"error": str(error)}, status=400)
+    except CollectionError as error:
+        return web.json_response({"error": str(error)}, status=400)
     except CatalogError as error:
         return web.json_response({"error": str(error)}, status=400)
     except BatchConflict as error:
@@ -115,6 +119,34 @@ def _query_bool(request: web.Request, name: str, default: bool = False) -> bool:
     raise WorkflowError(f"{name} 必须是布尔值")
 
 
+def _resolve_image_disk_path(
+    output_dir: Path | str | None, record: dict[str, Any]
+) -> Path | None:
+    """计算历史记录对应图片在磁盘中的绝对路径。
+
+    - 未配置 output_dir 时返回 None;
+    - filename / subfolder 非法(绝对路径、盘符、.. 等)时返回 None;
+    - 解析后越出 output_dir 作用域(含符号链接越界)时返回 None。
+    调用方据此决定是否执行 unlink,任何情况下都不会删除 output_dir 之外的文件。
+    """
+    if output_dir is None:
+        return None
+    try:
+        filename = normalize_lora_path(record.get("filename"))
+        subfolder = str(record.get("subfolder") or "").strip()
+        if subfolder:
+            subfolder = normalize_lora_path(subfolder)
+    except WorkflowError:
+        return None
+    root = Path(output_dir)
+    target = root / subfolder if subfolder else root
+    target = (target / filename).resolve()
+    # 二次确认解析结果仍位于 output 目录内(防符号链接/穿越越界)。
+    if not target.is_relative_to(root.resolve()):
+        return None
+    return target
+
+
 def _reveal_in_file_manager(path: Path) -> None:
     """在系统文件管理器中定位并高亮选中该文件(阻塞调用,须经 to_thread 执行)。
 
@@ -127,6 +159,51 @@ def _reveal_in_file_manager(path: Path) -> None:
         subprocess.run(["open", "-R", str(path)], check=False)
     else:
         subprocess.run(["xdg-open", str(path.parent)], check=False)
+
+
+def _open_directory(path: Path) -> None:
+    """在系统文件管理器中直接打开目录本身(阻塞调用,须经 to_thread 执行)。"""
+    if sys.platform.startswith("win"):
+        os.startfile(str(path))  # type: ignore[attr-defined]
+    elif sys.platform == "darwin":
+        subprocess.run(["open", str(path)], check=False)
+    else:
+        subprocess.run(["xdg-open", str(path)], check=False)
+
+
+def _system_pick_folder() -> str:
+    """唤起本地原生目录选择弹窗,返回绝对路径字符串;取消则返回空字符串。
+
+    优先使用 tkinter;整合包精简环境缺少 tkinter 时回退到 PowerShell 对话框。
+    """
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        path = filedialog.askdirectory(title="选择图片快捷导出文件夹")
+        root.destroy()
+        return os.path.normpath(path) if path else ""
+    except Exception:
+        # 兼容无 tkinter 的嵌入式 Python 环境
+        if sys.platform.startswith("win"):
+            cmd = (
+                'powershell -NoProfile -Command "'
+                "[System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms') | Out-Null; "
+                "$f = New-Object System.Windows.Forms.FolderBrowserDialog; "
+                "$f.Description = '选择图片快捷导出文件夹'; "
+                "if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) "
+                "{ Write-Output $f.SelectedPath }\""
+            )
+            try:
+                res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+                picked = res.stdout.strip()
+                return os.path.normpath(picked) if res.returncode == 0 and picked else ""
+            except Exception:
+                return ""
+        return ""
 
 
 def create_app(
@@ -518,8 +595,16 @@ def create_app(
     async def resources(_: web.Request) -> web.Response:
         return web.json_response(await client.resource_inventory())
 
-    async def list_style_presets(_: web.Request) -> web.Response:
-        return web.json_response(style_presets.list())
+    async def list_style_presets(request: web.Request) -> web.Response:
+        # collection_id 为空或 0 表示“全部预设”,仅正整数才按收藏夹过滤。
+        raw_collection = request.query.get("collection_id", "")
+        try:
+            collection_id = int(raw_collection) if raw_collection else 0
+        except ValueError as error:
+            raise WorkflowError("collection_id 必须是整数") from error
+        return web.json_response(
+            style_presets.list(collection_id=collection_id if collection_id > 0 else None)
+        )
 
     async def _parse_preset_request(request: web.Request) -> tuple[dict[str, Any], bytes | None]:
         """解析预设提交,返回 (payload, 缩略图字节)。
@@ -601,6 +686,80 @@ def create_app(
             raise KeyError(request.match_info["preset_id"])
         return web.json_response({"deleted": True})
 
+    async def list_style_preset_collections(_: web.Request) -> web.Response:
+        # 与 /api/gallery/collections 对称:一次性返回全库总数与各收藏夹统计。
+        return web.json_response(style_presets.list_collections())
+
+    async def create_style_preset_collection(request: web.Request) -> web.Response:
+        body = await _json_body(request)
+        name = body.get("name")
+        if not isinstance(name, str):
+            raise WorkflowError("name 必须是字符串")
+        return web.json_response(await style_presets.create_collection(name), status=201)
+
+    async def delete_style_preset_collection(request: web.Request) -> web.Response:
+        collection_id = int(request.match_info["collection_id"])
+        # 默认收藏夹(ID:1)由 store 抛出 WorkflowError,中间件统一转为 400。
+        if not await style_presets.delete_collection(collection_id):
+            raise KeyError(collection_id)
+        return web.json_response({"deleted": True, "id": collection_id})
+
+    async def toggle_style_preset_default_favorite(request: web.Request) -> web.Response:
+        preset_id = request.match_info["preset_id"]
+        return web.json_response(await style_presets.toggle_default_favorite(preset_id))
+
+    async def set_style_preset_collections(request: web.Request) -> web.Response:
+        preset_id = request.match_info["preset_id"]
+        body = await _json_body(request)
+        collection_ids = body.get("collection_ids")
+        if not isinstance(collection_ids, list):
+            raise WorkflowError("collection_ids 必须是整数数组")
+        return web.json_response(
+            await style_presets.set_preset_collections(preset_id, collection_ids)
+        )
+
+    def _batch_preset_ids(body: dict[str, Any]) -> list[str]:
+        """归一化批量预设 ID 入参:必须是数组,去空去重并保持原顺序。"""
+        raw = body.get("preset_ids")
+        if not isinstance(raw, list):
+            raise WorkflowError("preset_ids 必须是数组")
+        result: list[str] = []
+        for val in raw:
+            if isinstance(val, bool):
+                continue
+            text = str(val or "").strip()
+            if text and text not in result:
+                result.append(text)
+        return result
+
+    async def batch_delete_style_presets(request: web.Request) -> web.Response:
+        """批量删除预设:单事务写盘,并同步物理删除封面缩略图。"""
+        body = await _json_body(request)
+        preset_ids = _batch_preset_ids(body)
+        if not preset_ids:
+            raise WorkflowError("preset_ids 不能为空")
+        deleted_count = await style_presets.delete_batch(preset_ids)
+        return web.json_response(
+            {"deleted": deleted_count, "requested": len(preset_ids)}
+        )
+
+    async def batch_update_preset_collections(request: web.Request) -> web.Response:
+        """批量调整预设所属分类,支持 add / remove / set 三种模式。"""
+        body = await _json_body(request)
+        preset_ids = _batch_preset_ids(body)
+        if not preset_ids:
+            raise WorkflowError("preset_ids 不能为空")
+        mode = str(body.get("mode") or "").strip()
+        collection_ids = body.get("collection_ids")
+        if not isinstance(collection_ids, list):
+            raise WorkflowError("collection_ids 必须是整数数组")
+        updated = await style_presets.batch_update_collections(
+            preset_ids, collection_ids, mode
+        )
+        return web.json_response(
+            {"mode": mode, "updated": updated, "updated_count": len(updated)}
+        )
+
     async def list_prompt_rules(_: web.Request) -> web.Response:
         return web.json_response(prompt_rules.list())
 
@@ -668,9 +827,47 @@ def create_app(
         try:
             page = int(request.query.get("page", "1"))
             limit = int(request.query.get("limit", "24"))
+            raw_collection = request.query.get("collection_id", "")
+            collection_id = int(raw_collection) if raw_collection else 0
         except ValueError as error:
             raise WorkflowError("分页参数无效") from error
-        return web.json_response(await history.list_images(page, limit))
+        # 0 或空值表示“全部作品”,仅正整数才按收藏夹过滤。
+        return web.json_response(
+            await history.list_images(
+                page, limit, collection_id=collection_id if collection_id > 0 else None
+            )
+        )
+
+    async def list_gallery_collections(_: web.Request) -> web.Response:
+        # 同时返回全库图片总数,前端胶囊栏无需依赖其他异步请求的时序。
+        collections = await history.list_collections()
+        all_total = await history.count_images()
+        return web.json_response({"all_total": all_total, "collections": collections})
+
+    async def create_gallery_collection(request: web.Request) -> web.Response:
+        body = await _json_body(request)
+        name = body.get("name")
+        if not isinstance(name, str):
+            raise CollectionError("name 必须是字符串")
+        return web.json_response(await history.create_collection(name), status=201)
+
+    async def delete_gallery_collection(request: web.Request) -> web.Response:
+        collection_id = int(request.match_info["collection_id"])
+        await history.delete_collection(collection_id)
+        return web.json_response({"deleted": True, "id": collection_id})
+
+    async def toggle_default_favorite(request: web.Request) -> web.Response:
+        image_id = int(request.match_info["image_id"])
+        return web.json_response(await history.toggle_default_favorite(image_id))
+
+    async def set_image_collections(request: web.Request) -> web.Response:
+        image_id = int(request.match_info["image_id"])
+        body = await _json_body(request)
+        collection_ids = body.get("collection_ids")
+        if not isinstance(collection_ids, list):
+            raise CollectionError("collection_ids 必须是整数数组")
+        updated = await history.set_image_collections(image_id, collection_ids)
+        return web.json_response({"image_id": image_id, "collection_ids": updated})
 
     async def _regeneration_context(image_id: int) -> tuple[dict[str, Any], dict[str, Any]]:
         record = await history.get_image(image_id)
@@ -869,9 +1066,172 @@ def create_app(
 
     async def delete_history(request: web.Request) -> web.Response:
         image_id = int(request.match_info["image_id"])
+        # 先取元数据:记录不存在时由 get_image 抛 KeyError,统一映射为 404。
+        record = await history.get_image(image_id)
+        target_file = _resolve_image_disk_path(app[OUTPUT_DIR_KEY], record)
+        file_deleted = False
+        if target_file is not None and target_file.is_file():
+            try:
+                await asyncio.to_thread(target_file.unlink)
+                file_deleted = True
+            except FileNotFoundError:
+                # 幽灵记录:文件已被用户手动移走,继续清理数据库记录。
+                logger.info("物理图片文件已不存在,仅清理记录(%s)", target_file)
+            except OSError as error:
+                # 文件被占用等场景:不提交数据库删除,保证状态一致。
+                logger.warning("删除本地物理图片文件失败(%s): %s", target_file, error)
+                return web.json_response(
+                    {"error": f"无法删除本地物理文件: {error}"}, status=500
+                )
         if not await history.delete_image(image_id):
             raise KeyError(image_id)
-        return web.json_response({"deleted": True})
+        return web.json_response({"deleted": True, "file_deleted": file_deleted})
+
+    def _batch_image_ids(body: dict[str, Any]) -> list[int]:
+        """校验并归一化批量接口的 image_ids 字段(去重、保持提交顺序)。"""
+        raw = body.get("image_ids")
+        if not isinstance(raw, list):
+            raise WorkflowError("image_ids 必须是整数数组")
+        result: list[int] = []
+        for value in raw:
+            if isinstance(value, bool):
+                raise WorkflowError("image_ids 必须是整数数组")
+            try:
+                number = int(value)
+            except (TypeError, ValueError) as error:
+                raise WorkflowError("image_ids 必须是整数数组") from error
+            if number <= 0:
+                raise WorkflowError("image_ids 必须是正整数")
+            if number not in result:
+                result.append(number)
+        return result
+
+    async def batch_delete_history(request: web.Request) -> web.Response:
+        """批量删除作品:先物理删文件,再单事务删记录。
+
+        文件被占用等 OSError 视为致命错误:整批不提交数据库删除,
+        返回 500 并列出失败项,保证磁盘与数据库状态一致。
+        文件已不存在(幽灵记录)则跳过,继续清理记录。
+        """
+        body = await _json_body(request)
+        image_ids = _batch_image_ids(body)
+        if not image_ids:
+            raise WorkflowError("image_ids 不能为空")
+        output_dir = app[OUTPUT_DIR_KEY]
+        records: list[dict[str, Any]] = []
+        for image_id in image_ids:
+            try:
+                records.append(await history.get_image(image_id))
+            except KeyError:
+                # 记录已不存在:幂等跳过,不阻断整批。
+                continue
+        deleted_files = 0
+        missing_files = 0
+        failures: list[dict[str, Any]] = []
+        for record in records:
+            target = _resolve_image_disk_path(output_dir, record)
+            if target is None or not target.is_file():
+                missing_files += 1
+                continue
+            try:
+                await asyncio.to_thread(target.unlink)
+                deleted_files += 1
+            except FileNotFoundError:
+                missing_files += 1
+            except OSError as error:
+                logger.warning("批量删除本地物理图片文件失败(%s): %s", target, error)
+                failures.append({"id": record["id"], "error": str(error)})
+        if failures:
+            return web.json_response(
+                {
+                    "error": f"有 {len(failures)} 个文件无法删除,已取消整批删除",
+                    "failures": failures,
+                },
+                status=500,
+            )
+        deleted_records = await history.delete_images_batch(
+            [int(record["id"]) for record in records]
+        )
+        return web.json_response(
+            {
+                "deleted": deleted_records,
+                "file_deleted": deleted_files,
+                "file_missing": missing_files,
+                "requested": len(image_ids),
+            }
+        )
+
+    async def batch_export_history(request: web.Request) -> web.Response:
+        """批量导出作品到已配置的导出文件夹,同名文件自动递增重命名防覆盖。"""
+        body = await _json_body(request)
+        image_ids = _batch_image_ids(body)
+        if not image_ids:
+            raise WorkflowError("image_ids 不能为空")
+        settings = load_app_settings(storage)
+        export_dir = str(settings.get("export_dir") or "").strip()
+        if not export_dir:
+            raise WorkflowError("尚未配置导出文件夹，请先设置")
+        target_dir = Path(export_dir)
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise WorkflowError(f"无法创建或访问导出文件夹: {error}")
+
+        output_dir = app[OUTPUT_DIR_KEY]
+        exported: list[dict[str, Any]] = []
+        failures: list[dict[str, Any]] = []
+        for image_id in image_ids:
+            try:
+                record = await history.get_image(image_id)
+            except KeyError:
+                failures.append({"id": image_id, "error": "记录不存在"})
+                continue
+            source = _resolve_image_disk_path(output_dir, record)
+            if source is None or not source.is_file():
+                failures.append({"id": image_id, "error": "源图片在磁盘中不存在"})
+                continue
+            # 防重名自增:绝不覆盖目标目录中的历史文件。
+            dest = target_dir / source.name
+            counter = 1
+            while dest.exists():
+                dest = target_dir / f"{source.stem}_{counter}{source.suffix}"
+                counter += 1
+            try:
+                await asyncio.to_thread(shutil.copy2, source, dest)
+            except OSError as error:
+                logger.warning("批量导出图片失败(%s): %s", source, error)
+                failures.append({"id": image_id, "error": str(error)})
+                continue
+            exported.append({"id": image_id, "filename": dest.name, "dest_path": str(dest)})
+        return web.json_response(
+            {
+                "success": not failures,
+                "exported": exported,
+                "exported_count": len(exported),
+                "failed_count": len(failures),
+                "failures": failures,
+                "folder_name": target_dir.name or str(target_dir),
+            }
+        )
+
+    async def batch_update_collections(request: web.Request) -> web.Response:
+        """批量调整收藏夹归属,支持 add / remove / set 三种模式。"""
+        body = await _json_body(request)
+        image_ids = _batch_image_ids(body)
+        if not image_ids:
+            raise WorkflowError("image_ids 不能为空")
+        mode = body.get("mode")
+        if not isinstance(mode, str) or mode not in {"add", "remove", "set"}:
+            raise CollectionError("mode 必须是 add、remove 或 set")
+        collection_ids = body.get("collection_ids")
+        if not isinstance(collection_ids, list):
+            raise CollectionError("collection_ids 必须是整数数组")
+        updated = await history.batch_update_image_collections(
+            image_ids, collection_ids, mode
+        )
+        return web.json_response(
+            {"mode": mode, "updated": updated, "updated_count": len(updated)}
+        )
 
     async def image(request: web.Request) -> web.Response:
         record = await history.get_image(int(request.match_info["image_id"]))
@@ -885,20 +1245,9 @@ def create_app(
             return web.json_response(
                 {"error": "未配置或未找到 ComfyUI 输出目录"}, status=400
             )
-        # 复用 LoRA 路径规范:拒绝绝对路径、盘符、.. 与空段,防止路径穿越。
-        try:
-            filename = normalize_lora_path(record.get("filename"))
-            subfolder = str(record.get("subfolder") or "").strip()
-            if subfolder:
-                subfolder = normalize_lora_path(subfolder)
-        except WorkflowError:
-            return web.json_response({"error": "图片路径无效"}, status=400)
-        target = Path(output_dir)
-        if subfolder:
-            target = target / subfolder
-        target = (target / filename).resolve()
-        # 二次确认解析结果仍位于 output 目录内(防符号链接/穿越越界)。
-        if not target.is_relative_to(Path(output_dir)):
+        # 复用统一的安全路径解析:拒绝绝对路径、盘符、.. 与越界解析结果。
+        target = _resolve_image_disk_path(output_dir, record)
+        if target is None:
             return web.json_response({"error": "图片路径无效"}, status=400)
         if not target.is_file():
             return web.json_response({"error": "文件在本地磁盘中不存在"}, status=404)
@@ -908,6 +1257,80 @@ def create_app(
             logger.warning("打开文件位置失败(%s): %s", target, error)
             return web.json_response({"error": "无法打开文件资源管理器"}, status=500)
         return web.json_response({"opened": True})
+
+    async def get_export_folder(_: web.Request) -> web.Response:
+        settings = load_app_settings(storage)
+        export_dir = str(settings.get("export_dir") or "").strip()
+        exists = bool(export_dir and Path(export_dir).is_dir())
+        return web.json_response({"export_dir": export_dir, "exists": exists})
+
+    async def update_export_folder(request: web.Request) -> web.Response:
+        body = await _json_body(request)
+        raw_path = str(body.get("export_dir") or "").strip()
+        settings = load_app_settings(storage)
+        if raw_path:
+            norm_path = os.path.normpath(raw_path)
+            target = Path(norm_path)
+            try:
+                target.mkdir(parents=True, exist_ok=True)
+            except OSError as error:
+                raise WorkflowError(f"无法创建或访问指定文件夹: {error}")
+            settings["export_dir"] = norm_path
+            save_app_settings(storage, settings)
+            return web.json_response({"export_dir": norm_path, "exists": True})
+        settings.pop("export_dir", None)
+        save_app_settings(storage, settings)
+        return web.json_response({"export_dir": "", "exists": False})
+
+    async def pick_export_folder(_: web.Request) -> web.Response:
+        picked = await asyncio.to_thread(_system_pick_folder)
+        return web.json_response({"path": picked})
+
+    async def open_export_folder(_: web.Request) -> web.Response:
+        settings = load_app_settings(storage)
+        export_dir = str(settings.get("export_dir") or "").strip()
+        if not export_dir or not Path(export_dir).is_dir():
+            raise WorkflowError("导出文件夹尚未设置或在磁盘中不存在")
+        await asyncio.to_thread(_open_directory, Path(export_dir))
+        return web.json_response({"opened": True})
+
+    async def copy_image_to_export(request: web.Request) -> web.Response:
+        image_id = int(request.match_info["image_id"])
+        record = await history.get_image(image_id)
+        source = _resolve_image_disk_path(app[OUTPUT_DIR_KEY], record)
+        if source is None or not source.is_file():
+            raise web.HTTPNotFound(text="源图片在磁盘中不存在")
+
+        settings = load_app_settings(storage)
+        export_dir = str(settings.get("export_dir") or "").strip()
+        if not export_dir:
+            raise WorkflowError("尚未配置导出文件夹，请先设置")
+
+        target_dir = Path(export_dir)
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise WorkflowError(f"无法创建或访问导出文件夹: {error}")
+
+        # 防重名自增:绝不覆盖目标目录中的历史文件。
+        dest = target_dir / source.name
+        counter = 1
+        while dest.exists():
+            dest = target_dir / f"{source.stem}_{counter}{source.suffix}"
+            counter += 1
+
+        try:
+            await asyncio.to_thread(shutil.copy2, source, dest)
+        except OSError as error:
+            raise WorkflowError(f"复制图片失败: {error}")
+        return web.json_response(
+            {
+                "success": True,
+                "filename": dest.name,
+                "folder_name": target_dir.name or str(target_dir),
+                "dest_path": str(dest),
+            }
+        )
 
     async def index(_: web.Request) -> web.FileResponse:
         return web.FileResponse(root / "static" / "index.html")
@@ -949,7 +1372,28 @@ def create_app(
     app.router.add_get("/api/resources", resources)
     app.router.add_get("/api/style-presets", list_style_presets)
     app.router.add_post("/api/style-presets", create_style_preset)
+    # 收藏夹静态段必须先于 /api/style-presets/{preset_id} 动态段注册,
+    # 否则 "collections" 会被当作 preset_id 吞掉。
+    app.router.add_get("/api/style-presets/collections", list_style_preset_collections)
+    app.router.add_post("/api/style-presets/collections", create_style_preset_collection)
+    app.router.add_delete(
+        r"/api/style-presets/collections/{collection_id:\d+}",
+        delete_style_preset_collection,
+    )
+    # 批量静态段同样必须先于 /api/style-presets/{preset_id} 动态段注册,
+    # 否则 "batch-delete" / "batch-collections" 会被当作 preset_id 吞掉。
+    app.router.add_post("/api/style-presets/batch-delete", batch_delete_style_presets)
+    app.router.add_post(
+        "/api/style-presets/batch-collections", batch_update_preset_collections
+    )
     app.router.add_get("/api/style-presets/{preset_id}/thumbnail", style_preset_thumbnail)
+    app.router.add_post(
+        "/api/style-presets/{preset_id}/toggle-default-favorite",
+        toggle_style_preset_default_favorite,
+    )
+    app.router.add_post(
+        "/api/style-presets/{preset_id}/collections", set_style_preset_collections
+    )
     app.router.add_put("/api/style-presets/{preset_id}", update_style_preset)
     app.router.add_patch("/api/style-presets/{preset_id}", update_style_preset)
     app.router.add_delete("/api/style-presets/{preset_id}", delete_style_preset)
@@ -987,6 +1431,21 @@ def create_app(
     app.router.add_post("/api/batches/{batch_id}/stop", stop_batch)
     app.router.add_delete("/api/batches/queue/{queue_id}", remove_queued_batch)
     app.router.add_get("/api/history", list_history)
+    # 批量端点必须先于 /api/history/{image_id} 系列注册,避免被动态段吞掉。
+    app.router.add_post("/api/history/batch-delete", batch_delete_history)
+    app.router.add_post("/api/history/batch-export", batch_export_history)
+    app.router.add_post("/api/history/batch-collections", batch_update_collections)
+    app.router.add_get("/api/gallery/collections", list_gallery_collections)
+    app.router.add_post("/api/gallery/collections", create_gallery_collection)
+    app.router.add_delete(
+        r"/api/gallery/collections/{collection_id:\d+}", delete_gallery_collection
+    )
+    app.router.add_post(
+        r"/api/history/{image_id:\d+}/toggle-default-favorite", toggle_default_favorite
+    )
+    app.router.add_post(
+        r"/api/history/{image_id:\d+}/collections", set_image_collections
+    )
     app.router.add_get(
         r"/api/history/{image_id:\d+}/regeneration-options",
         regeneration_options,
@@ -996,6 +1455,13 @@ def create_app(
     )
     app.router.add_delete(r"/api/history/{image_id:\d+}", delete_history)
     app.router.add_post(r"/api/history/{image_id:\d+}/open-folder", open_folder)
+    app.router.add_get("/api/settings/export-folder", get_export_folder)
+    app.router.add_post("/api/settings/export-folder", update_export_folder)
+    app.router.add_post("/api/system/pick-folder", pick_export_folder)
+    app.router.add_post("/api/settings/open-export-folder", open_export_folder)
+    app.router.add_post(
+        r"/api/history/{image_id:\d+}/copy-to-export", copy_image_to_export
+    )
     app.router.add_get(r"/api/images/{image_id:\d+}", image)
     app.router.add_get("/", index)
     app.router.add_get("/favicon.ico", favicon)

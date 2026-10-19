@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
+from typing import Any
 
 
 def backup_corrupt_file(path: Path) -> Path:
@@ -27,3 +29,27 @@ def backup_corrupt_file(path: Path) -> Path:
         # 仅在改名失败时进入:保留原文件,调用方以空数据继续启动。
         return path
     return backup
+
+
+def load_app_settings(storage_dir: Path) -> dict[str, Any]:
+    """读取应用级配置(app_settings.json);文件缺失或损坏时返回空字典。"""
+    settings_file = Path(storage_dir) / "app_settings.json"
+    if not settings_file.is_file():
+        return {}
+    try:
+        value = json.loads(settings_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def save_app_settings(storage_dir: Path, settings: dict[str, Any]) -> None:
+    """原子写入应用级配置:先写临时文件再替换,避免写入中断导致配置损坏。"""
+    directory = Path(storage_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    settings_file = directory / "app_settings.json"
+    temp_file = settings_file.with_suffix(".tmp")
+    temp_file.write_text(
+        json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    temp_file.replace(settings_file)

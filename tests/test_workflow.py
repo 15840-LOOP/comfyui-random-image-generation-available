@@ -547,6 +547,26 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("随机角色", text)
 
 
+def test_workflow_negative_prompt_does_not_contain_meta_tags():
+    """验证即使上游传入包含 1girl 的 costume_tags，Node 45 也绝对不会包含 1girl"""
+    from anima_webui.catalog import is_meta_tag, normalize_text
+
+    base_negative = "worst quality, low quality"
+    suppressed_costumes = ["1girl", "white shirt", "black jacket", "navel cutout"]
+    existing_negative = {normalize_text(p) for p in base_negative.split(",")}
+
+    added_negatives = [
+        tag
+        for tag in dict.fromkeys(suppressed_costumes)
+        if normalize_text(tag)
+        and normalize_text(tag) not in existing_negative
+        and not is_meta_tag(normalize_text(tag))
+    ]
+
+    assert "1girl" not in added_negatives
+    assert added_negatives == ["white shirt", "black jacket", "navel cutout"]
+
+
 class TemplateValidationTests(unittest.TestCase):
     def test_templates_load_rejects_renumbered_exports(self):
         # 回归 #P2-5:重新导出(节点重编号)的模板应在加载时给出明确错误,

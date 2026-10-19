@@ -27,14 +27,18 @@ class StylePresetTests(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    async def test_favorites_sort_first_and_updates_replace_the_snapshot(self):
+    async def test_list_orders_by_updated_at_regardless_of_favorite(self):
+        # 加星仅作分类标识,不再置顶:顺序完全由 updated_at 决定。
         favorite = await self.store.create(
             {"name": "Favorite", "favorite": True, "settings": snapshot(width=768)}
         )
         regular = await self.store.create(
             {"name": "Regular", "favorite": False, "settings": snapshot(width=832)}
         )
-        self.assertEqual([item["id"] for item in self.store.list()["items"]], [favorite["id"], regular["id"]])
+        self.assertEqual(
+            [item["id"] for item in self.store.list()["items"]],
+            [regular["id"], favorite["id"]],
+        )
 
         updated = await self.store.update(
             regular["id"],
@@ -42,8 +46,35 @@ class StylePresetTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(updated["name"], "Renamed")
         self.assertEqual(updated["settings"]["width"], 1024)
+        self.assertTrue(updated["favorite"])
+        self.assertEqual(updated["collection_ids"], [1])
         self.assertTrue(await self.store.delete(favorite["id"]))
         self.assertFalse(await self.store.delete("missing"))
+
+    async def test_favorite_toggle_does_not_change_relative_order(self):
+        first = await self.store.create({"name": "First", "settings": snapshot()})
+        second = await self.store.create({"name": "Second", "settings": snapshot()})
+        before = [item["id"] for item in self.store.list()["items"]]
+        self.assertEqual(before, [second["id"], first["id"]])
+
+        # 给较早的预设加星,它仍应排在后面。
+        await self.store.toggle_default_favorite(first["id"])
+        after = [item["id"] for item in self.store.list()["items"]]
+        self.assertEqual(after, [second["id"], first["id"]])
+
+    async def test_list_filters_by_collection_id(self):
+        plain = await self.store.create({"name": "Plain", "settings": snapshot()})
+        starred = await self.store.create({"name": "Starred", "settings": snapshot()})
+        await self.store.toggle_default_favorite(starred["id"])
+
+        filtered = self.store.list(collection_id=1)
+        self.assertEqual([item["id"] for item in filtered["items"]], [starred["id"]])
+        # count 始终为全库总数,不受过滤影响。
+        self.assertEqual(filtered["count"], 2)
+        self.assertEqual(len(self.store.list()["items"]), 2)
+        self.assertEqual(self.store.list(collection_id=999)["items"], [])
+        self.assertEqual(len(self.store.list(collection_id=0)["items"]), 2)
+        self.assertIn(plain["id"], [item["id"] for item in self.store.list()["items"]])
 
     async def test_atomic_save_leaves_valid_json_without_temp_files(self):
         await self.store.create({"name": "Atomic", "settings": snapshot(), "favorite": False})
@@ -302,6 +333,242 @@ class StylePresetTests(unittest.IsolatedAsyncioTestCase):
         )
         await self.store.save_thumbnail(created["id"], b"png-bytes")
         self.assertEqual(list(self.store.thumbnail_dir.glob("preset-thumb-*.png")), [])
+
+    # ---------- 收藏夹(分类) ----------
+    def test_default_collection_is_always_present(self):
+        payload = self.store.list_collections()
+        self.assertEqual(payload["all_total"], 0)
+        self.assertEqual(
+            payload["collections"],
+            [{"id": 1, "name": "默认收藏", "is_default": True, "count": 0}],
+        )
+
+    async def test_create_collection_assigns_incrementing_ids(self):
+        first = await self.store.create_collection("风景")
+        second = await self.store.create_collection("人物")
+        self.assertEqual(first["id"], 2)
+        self.assertEqual(second["id"], 3)
+        self.assertFalse(first["is_default"])
+        self.assertEqual([item["name"] for item in self.store.list_collections()["collections"]], ["默认收藏", "风景", "人物"])
+
+    async def test_create_collection_validates_name(self):
+        with self.assertRaisesRegex(WorkflowError, "不能为空"):
+            await self.store.create_collection("   ")
+        with self.assertRaisesRegex(WorkflowError, "100"):
+            await self.store.create_collection("x" * 101)
+        await self.store.create_collection("风景")
+        with self.assertRaisesRegex(WorkflowError, "已存在"):
+            await self.store.create_collection("风景")
+
+    async def test_list_collections_counts_members(self):
+        collection = await self.store.create_collection("风景")
+        first = await self.store.create({"name": "A", "settings": snapshot()})
+        second = await self.store.create({"name": "B", "settings": snapshot()})
+        await self.store.set_preset_collections(first["id"], [collection["id"]])
+        await self.store.set_preset_collections(second["id"], [1, collection["id"]])
+
+        payload = self.store.list_collections()
+        self.assertEqual(payload["all_total"], 2)
+        counts = {item["id"]: item["count"] for item in payload["collections"]}
+        self.assertEqual(counts[1], 1)
+        self.assertEqual(counts[collection["id"]], 2)
+
+    async def test_delete_collection_unbinds_presets_without_deleting_them(self):
+        collection = await self.store.create_collection("风景")
+        created = await self.store.create({"name": "Kept", "settings": snapshot()})
+        await self.store.set_preset_collections(created["id"], [1, collection["id"]])
+
+        self.assertTrue(await self.store.delete_collection(collection["id"]))
+        self.assertFalse(await self.store.delete_collection(collection["id"]))
+        # 预设本体必须保留,仅解绑被删除的分类。
+        self.assertEqual(len(self.store.items), 1)
+        item = self.store.items[0]
+        self.assertEqual(item["collection_ids"], [1])
+        self.assertTrue(item["favorite"])
+
+    async def test_default_collection_cannot_be_deleted(self):
+        with self.assertRaisesRegex(WorkflowError, "默认收藏夹不能删除"):
+            await self.store.delete_collection(1)
+        self.assertEqual(len(self.store.collections), 1)
+
+    async def test_toggle_default_favorite_round_trip(self):
+        created = await self.store.create({"name": "Toggle", "settings": snapshot()})
+        self.assertEqual(created["collection_ids"], [])
+        self.assertFalse(created["favorite"])
+
+        added = await self.store.toggle_default_favorite(created["id"])
+        self.assertEqual(added, {"id": created["id"], "is_favorite": True, "collection_ids": [1]})
+        self.assertTrue(self.store.items[0]["favorite"])
+
+        removed = await self.store.toggle_default_favorite(created["id"])
+        self.assertEqual(removed, {"id": created["id"], "is_favorite": False, "collection_ids": []})
+        self.assertFalse(self.store.items[0]["favorite"])
+
+        with self.assertRaises(KeyError):
+            await self.store.toggle_default_favorite("missing")
+
+    async def test_set_preset_collections_syncs_favorite_flag(self):
+        collection = await self.store.create_collection("风景")
+        created = await self.store.create({"name": "Sync", "settings": snapshot()})
+
+        updated = await self.store.set_preset_collections(created["id"], [collection["id"]])
+        self.assertEqual(updated["collection_ids"], [collection["id"]])
+        self.assertFalse(updated["favorite"])
+
+        updated = await self.store.set_preset_collections(created["id"], [1, collection["id"]])
+        self.assertEqual(updated["collection_ids"], [1, collection["id"]])
+        self.assertTrue(updated["favorite"])
+
+        with self.assertRaisesRegex(WorkflowError, "收藏夹不存在"):
+            await self.store.set_preset_collections(created["id"], [999])
+        with self.assertRaises(KeyError):
+            await self.store.set_preset_collections("missing", [])
+
+    async def test_collections_persist_and_reload(self):
+        collection = await self.store.create_collection("风景")
+        created = await self.store.create({"name": "Persisted", "settings": snapshot()})
+        await self.store.set_preset_collections(created["id"], [collection["id"]])
+
+        payload = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual(payload["collections"][0]["id"], 1)
+        self.assertEqual(payload["collections"][1]["name"], "风景")
+
+        reloaded = StylePresetStore(self.path)
+        self.assertEqual([item["id"] for item in reloaded.collections], [1, collection["id"]])
+        item = next(entry for entry in reloaded.items if entry["id"] == created["id"])
+        self.assertEqual(item["collection_ids"], [collection["id"]])
+
+    def test_legacy_favorite_without_collections_gains_default_collection(self):
+        # 老版本只有 favorite=True,加载后应自动获得 collection_ids=[1]。
+        payload = {
+            "version": 1,
+            "items": [
+                {
+                    "id": "preset_old_fav",
+                    "name": "OldFav",
+                    "favorite": True,
+                    "settings": {"width": 1024},
+                    "created_at": "2024-01-01T00:00:00+00:00",
+                    "updated_at": "2024-01-01T00:00:00+00:00",
+                },
+                {
+                    "id": "preset_old_plain",
+                    "name": "OldPlain",
+                    "favorite": False,
+                    "settings": {"width": 1024},
+                    "created_at": "2024-01-02T00:00:00+00:00",
+                    "updated_at": "2024-01-02T00:00:00+00:00",
+                },
+            ],
+        }
+        self.path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        store = StylePresetStore(self.path)
+        self.assertEqual(store.load_warnings, [])
+        by_id = {item["id"]: item for item in store.items}
+        self.assertEqual(by_id["preset_old_fav"]["collection_ids"], [1])
+        self.assertTrue(by_id["preset_old_fav"]["favorite"])
+        self.assertEqual(by_id["preset_old_plain"]["collection_ids"], [])
+        self.assertFalse(by_id["preset_old_plain"]["favorite"])
+        # 老文件缺少根级 collections 时自动补默认收藏夹。
+        self.assertEqual(store.collections, [{"id": 1, "name": "默认收藏", "is_default": True}])
+
+    def test_collection_ids_containing_default_implies_favorite(self):
+        payload = {
+            "version": 1,
+            "collections": [{"id": 1, "name": "默认收藏", "is_default": True}],
+            "items": [
+                {
+                    "id": "preset_ids_only",
+                    "name": "IdsOnly",
+                    "favorite": False,
+                    "collection_ids": [1],
+                    "settings": {"width": 1024},
+                    "created_at": "2024-01-01T00:00:00+00:00",
+                    "updated_at": "2024-01-01T00:00:00+00:00",
+                }
+            ],
+        }
+        self.path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        store = StylePresetStore(self.path)
+        self.assertTrue(store.items[0]["favorite"])
+        self.assertEqual(store.items[0]["collection_ids"], [1])
+
+    async def test_update_with_favorite_only_overrides_collections(self):
+        created = await self.store.create({"name": "Flip", "favorite": True, "settings": snapshot()})
+        self.assertEqual(created["collection_ids"], [1])
+        updated = await self.store.update(created["id"], {"favorite": False})
+        self.assertEqual(updated["collection_ids"], [])
+        self.assertFalse(updated["favorite"])
+
+    async def test_delete_batch_removes_records_and_thumbnails(self):
+        first = await self.store.create({"name": "BatchA", "settings": snapshot()})
+        second = await self.store.create({"name": "BatchB", "settings": snapshot()})
+        keep = await self.store.create({"name": "Keep", "settings": snapshot()})
+        await self.store.save_thumbnail(first["id"], b"\x89PNG\r\n\x1a\nA")
+        await self.store.save_thumbnail(second["id"], b"\x89PNG\r\n\x1a\nB")
+        await self.store.save_thumbnail(keep["id"], b"\x89PNG\r\n\x1a\nK")
+
+        # 重复 ID 与不存在的 ID 都应被静默忽略,保证接口幂等。
+        deleted = await self.store.delete_batch(
+            [first["id"], second["id"], first["id"], "missing"]
+        )
+        self.assertEqual(deleted, 2)
+        self.assertEqual([item["id"] for item in self.store.items], [keep["id"]])
+        self.assertFalse((self.store.thumbnail_dir / f"{first['id']}.png").exists())
+        self.assertFalse((self.store.thumbnail_dir / f"{second['id']}.png").exists())
+        self.assertTrue((self.store.thumbnail_dir / f"{keep['id']}.png").exists())
+
+        # 落盘后重新加载,删除结果应持久化。
+        reloaded = StylePresetStore(self.path)
+        self.assertEqual([item["id"] for item in reloaded.items], [keep["id"]])
+
+        # 空列表与全不存在时返回 0,且不产生额外写盘。
+        self.assertEqual(await self.store.delete_batch([]), 0)
+        self.assertEqual(await self.store.delete_batch(["missing"]), 0)
+
+    async def test_batch_update_collections_add_remove_set(self):
+        landscape = await self.store.create_collection("风景")
+        portrait = await self.store.create_collection("人像")
+        first = await self.store.create({"name": "BatchOne", "settings": snapshot()})
+        second = await self.store.create({"name": "BatchTwo", "settings": snapshot()})
+
+        added = await self.store.batch_update_collections(
+            [first["id"], second["id"]], [landscape["id"]], "add"
+        )
+        self.assertEqual(sorted(added), sorted([first["id"], second["id"]]))
+        by_id = {item["id"]: item for item in self.store.items}
+        self.assertEqual(by_id[first["id"]]["collection_ids"], [landscape["id"]])
+        self.assertFalse(by_id[first["id"]]["favorite"])
+
+        # add 模式应幂等,重复添加不会产生重复 ID。
+        await self.store.batch_update_collections([first["id"]], [landscape["id"]], "add")
+        by_id = {item["id"]: item for item in self.store.items}
+        self.assertEqual(by_id[first["id"]]["collection_ids"], [landscape["id"]])
+
+        # set 模式覆盖为默认收藏夹,应同步点亮 favorite。
+        await self.store.batch_update_collections([first["id"]], [1], "set")
+        by_id = {item["id"]: item for item in self.store.items}
+        self.assertEqual(by_id[first["id"]]["collection_ids"], [1])
+        self.assertTrue(by_id[first["id"]]["favorite"])
+
+        # remove 模式移除默认收藏夹,应同步熄灭 favorite。
+        await self.store.batch_update_collections([first["id"]], [1], "remove")
+        by_id = {item["id"]: item for item in self.store.items}
+        self.assertEqual(by_id[first["id"]]["collection_ids"], [])
+        self.assertFalse(by_id[first["id"]]["favorite"])
+
+        # 非法 mode 与非法分类 ID 的处理。
+        with self.assertRaisesRegex(WorkflowError, "mode"):
+            await self.store.batch_update_collections([first["id"]], [1], "toggle")
+        await self.store.batch_update_collections([second["id"]], [999, True, "x"], "add")
+        by_id = {item["id"]: item for item in self.store.items}
+        self.assertEqual(by_id[second["id"]]["collection_ids"], [landscape["id"]])
+
+        # 不存在的预设 ID 不应报错,返回空列表。
+        self.assertEqual(
+            await self.store.batch_update_collections(["missing"], [portrait["id"]], "add"),
+            [],
+        )
 
 
 if __name__ == "__main__":

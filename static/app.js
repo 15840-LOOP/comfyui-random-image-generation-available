@@ -82,12 +82,18 @@ const ui = Object.fromEntries(
     "gallery",
     "emptyState",
     "historyCount",
+    "btnSetExportFolder",
+    "exportFolderLabel",
+    "btnOpenExportFolder",
     "prevPage",
     "nextPage",
     "pageLabel",
     "detailDialog",
     "closeDialog",
     "detailImage",
+    "detailPrevious",
+    "detailNext",
+    "detailNavStatus",
     "imagePreviewDialog",
     "closeImagePreview",
     "imagePreviewPrevious",
@@ -107,6 +113,7 @@ const ui = Object.fromEntries(
     "copyNegativePrompt",
     "restoreSettings",
     "openFolder",
+    "quickExportImage",
     "deleteRecord",
     "toast",
     "poolDrawer",
@@ -287,9 +294,18 @@ const ui = Object.fromEntries(
     "presetError",
     "presetEmpty",
     "presetGrid",
+    "presetCollectionsBar",
+    "presetCollectionsDialog",
+    "presetCollectionsForm",
+    "presetCollectionsSummary",
+    "presetCollectionsChecklist",
+    "presetCollectionsError",
+    "closePresetCollections",
+    "cancelPresetCollections",
     "presetPrevPage",
     "presetNextPage",
     "presetPageLabel",
+    "btnTogglePresetBatchMode",
     "btnCreatePreset",
     "tabBtnGallery",
     "tabBtnPresets",
@@ -338,6 +354,37 @@ const ui = Object.fromEntries(
     "closePresetDelete",
     "cancelPresetDelete",
     "confirmPresetDelete",
+    "recordDeleteDialog",
+    "recordDeleteForm",
+    "recordDeleteSummary",
+    "recordDeleteError",
+    "closeRecordDelete",
+    "cancelRecordDelete",
+    "confirmRecordDelete",
+    "galleryCollectionsBar",
+    "btnGalleryAddCollection",
+    "btnPresetAddCollection",
+    "commandDeck",
+    "btnToggleBatchMode",
+    "batchActionBar",
+    "batchSelectedCount",
+    "batchSelectAll",
+    "batchClearSelection",
+    "batchExport",
+    "batchFavorite",
+    "batchDelete",
+    "batchExit",
+    "detailManageCollections",
+    "imageCollectionsDialog",
+    "imageCollectionsForm",
+    "imageCollectionsChecklist",
+    "imageCollectionsError",
+    "imageCollectionsBatchWarning",
+    "newCollectionNameInput",
+    "btnCreateAndCheckCollection",
+    "closeImageCollections",
+    "cancelImageCollections",
+    "saveImageCollections",
     "model_name",
     "sampler_name",
     "scheduler",
@@ -358,6 +405,9 @@ const ui = Object.fromEntries(
 
 // 0.2.0 新增控件按可选处理:旧版 index.html 缺少它们时只隐藏对应功能,不阻断整个界面。
 const OPTIONAL_CONTROLS = new Set([
+  "detailPrevious",
+  "detailNext",
+  "detailNavStatus",
   "livePreview",
   "sampleProgress",
   "sampleFill",
@@ -378,6 +428,22 @@ const OPTIONAL_CONTROLS = new Set([
   "variantModes",
   "redrawSections",
   "variantDrawerCount",
+  // 收藏夹常驻新建按钮:旧版 index.html 缺少时仅隐藏新建入口,不阻断界面。
+  "btnGalleryAddCollection",
+  "btnPresetAddCollection",
+  // 批量管理控件:旧版 index.html 缺少时整体降级为不可用,不阻断界面。
+  "imageCollectionsBatchWarning",
+  "commandDeck",
+  "btnToggleBatchMode",
+  "btnTogglePresetBatchMode",
+  "batchActionBar",
+  "batchSelectedCount",
+  "batchSelectAll",
+  "batchClearSelection",
+  "batchExport",
+  "batchFavorite",
+  "batchDelete",
+  "batchExit",
 ]);
 const missingUi = Object.entries(ui)
   .filter(([id, element]) => !element && !OPTIONAL_CONTROLS.has(id))
@@ -407,6 +473,24 @@ let regenerationTrigger = null;
 let historyPage = 1;
 let historyPages = 1;
 let historyItems = [];
+// 作品库二级筛选:0=全部作品,1=默认收藏,其他为自定义收藏夹 ID。
+let activeCollectionId = 0;
+let galleryCollections = [];
+// 全库图片总数:由 /api/gallery/collections 的 all_total 提供,作为“全部”胶囊的唯一数据源。
+let galleryAllTotal = 0;
+let galleryCollectionsRequest = 0;
+let imageCollectionsSaving = false;
+// ---------- 批量管理状态机 ----------
+// isBatchMode:是否处于批量选择模式;selectedBatchIds:已选作品 id 集合(跨页保留)。
+// lastBatchAnchorId:Shift 区间连选的锚点;batchBusy:批量请求在途时锁定操作条。
+let isBatchMode = false;
+const selectedBatchIds = new Set();
+let lastBatchAnchorId = null;
+let batchBusy = false;
+let batchBarHideTimer = null;
+// 快捷复制目标目录(后端 app_settings.json 持久化,前端仅缓存渲染)
+let currentExportFolder = "";
+let quickExportInFlight = false;
 const historyCache = new Map();
 let lastTerminalBatch = "";
 let toastTimer = null;
@@ -437,6 +521,26 @@ let stylePresets = [];
 // 预设库纯前端分页状态:每页展示 12 个预设。
 let presetPage = 1;
 const PRESET_PAGE_SIZE = 12;
+// ---------- 预设库批量管理状态机 ----------
+// isPresetBatchMode:是否处于预设批量选择模式;selectedPresetBatchIds:跨页保留的预设 ID 集合;
+// lastPresetBatchAnchorId:Shift 区间连选锚点;presetBatchBusy:批量请求在途时锁定操作条。
+let isPresetBatchMode = false;
+const selectedPresetBatchIds = new Set();
+let lastPresetBatchAnchorId = null;
+let presetBatchBusy = false;
+// 预设批量归类弹窗上下文:非空时 #presetCollectionsDialog 进入批量模式。
+let presetBatchCollectionsContext = null;
+// 预设批量删除弹窗上下文:非空时 #presetDeleteDialog 进入批量模式。
+let presetBatchDeleteContext = null;
+// 预设库二级筛选:0=全部预设,1=默认收藏,其他为自定义分类 ID。
+let presetCollections = [];
+let currentPresetCollectionId = 0;
+// 全库预设总数:由 /api/style-presets/collections 的 all_total 提供,作为“全部”胶囊的唯一数据源。
+let presetAllTotal = 0;
+let presetCollectionsRequest = 0;
+// 归类弹窗当前操作的预设对象。
+let presetCollectionsTarget = null;
+let presetCollectionsSaving = false;
 let resources = { models: [], upscale_models: [], samplers: [], schedulers: [] };
 let resourceError = "";
 let resourcesLoaded = false;
@@ -506,6 +610,89 @@ function toast(message) {
   ui.toast.classList.add("show");
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => ui.toast.classList.remove("show"), 3200);
+}
+
+// ---------- 快捷复制导出目录:配置同步、胶囊渲染与单图复制 ----------
+async function loadExportFolderConfig() {
+  try {
+    const data = await request("/api/settings/export-folder");
+    currentExportFolder = data.export_dir || "";
+    renderExportFolderWidget();
+  } catch (error) {
+    console.error("加载导出目录失败:", error);
+  }
+}
+
+function renderExportFolderWidget() {
+  if (!ui.btnSetExportFolder || !ui.exportFolderLabel) return;
+  if (currentExportFolder) {
+    const parts = currentExportFolder.replaceAll("\\", "/").split("/").filter(Boolean);
+    const folderName = parts.pop() || currentExportFolder;
+    ui.exportFolderLabel.textContent = `导出至: ${folderName}`;
+    ui.btnSetExportFolder.classList.add("configured");
+    ui.btnSetExportFolder.title = `导出目录: ${currentExportFolder} (点击更换)`;
+    if (ui.btnOpenExportFolder) ui.btnOpenExportFolder.hidden = false;
+  } else {
+    ui.exportFolderLabel.textContent = "设置导出目录";
+    ui.btnSetExportFolder.classList.remove("configured");
+    ui.btnSetExportFolder.title = "点击设置快捷复制的目标文件夹";
+    if (ui.btnOpenExportFolder) ui.btnOpenExportFolder.hidden = true;
+  }
+}
+
+async function triggerPickExportFolder() {
+  try {
+    toast("请在系统弹窗中选择文件夹...");
+    const picked = await request("/api/system/pick-folder", { method: "POST" });
+    if (!picked.path) return false;
+    const res = await request("/api/settings/export-folder", {
+      method: "POST",
+      body: JSON.stringify({ export_dir: picked.path }),
+    });
+    currentExportFolder = res.export_dir || "";
+    renderExportFolderWidget();
+    toast(`导出目录已设置为: ${currentExportFolder}`);
+    return true;
+  } catch (error) {
+    toast(`设置导出目录失败: ${error.message}`);
+    return false;
+  }
+}
+
+async function executeQuickExport() {
+  if (!selectedRecord || quickExportInFlight) return;
+  const button = ui.quickExportImage;
+  if (!button) return;
+
+  if (!currentExportFolder) {
+    toast("请先设置导出目录");
+    const ok = await triggerPickExportFolder();
+    if (!ok) return;
+  }
+
+  const originalText = button.textContent;
+  quickExportInFlight = true;
+  button.disabled = true;
+
+  try {
+    const res = await request(`/api/history/${selectedRecord.id}/copy-to-export`, {
+      method: "POST",
+    });
+    toast(`已复制到 ${res.folder_name}\\${res.filename}`);
+
+    button.classList.add("btn-success");
+    button.textContent = "已复制 ✓";
+    setTimeout(() => {
+      button.classList.remove("btn-success");
+      button.textContent = originalText;
+      button.disabled = false;
+      quickExportInFlight = false;
+    }, 1200);
+  } catch (error) {
+    toast(`复制失败: ${error.message}`);
+    button.disabled = false;
+    quickExportInFlight = false;
+  }
 }
 
 async function copyPromptToClipboard(text, button, successMsg) {
@@ -597,7 +784,10 @@ function applyPromptField(field, value) {
     const section = field.slice(6);
     draft.fixed[section] = value;
     const input = ui.dimensionList.querySelector(`[data-fixed="${section}"]`);
-    if (input) input.value = value;
+    if (input) {
+      input.value = value;
+      autoResizeFixedPrompt(input); // 必须补上这句，防止规范化后内容多行但高度卡在单行
+    }
     return;
   }
   if (field === "custom_prompt") {
@@ -977,7 +1167,7 @@ function renderDimensions() {
       article.innerHTML = `<div class="dimension-heading"><div><span class="dimension-icon">${meta.label.slice(0, 1)}</span><strong>${meta.label}</strong><small>${selected} 项已选</small></div><button class="manage-pool" type="button" data-manage="${section}">管理池 <span aria-hidden="true">→</span></button></div>
       <div class="dimension-mode" role="group" aria-label="${meta.label}模式"><button type="button" data-mode="off" class="${mode === "off" ? "active" : ""}">关闭</button><button type="button" data-mode="pool" class="${mode === "pool" ? "active" : ""}">随机池</button><button type="button" data-mode="fixed" class="${mode === "fixed" ? "active" : ""}">固定</button></div>
       <div class="dimension-body"><label class="draw-count"><span>抽取数量</span><input type="number" min="1" max="${section === "expression" ? 1 : 5}" step="1" value="${section === "expression" ? 1 : count}" data-count="${section}" ${mode !== "pool" || section === "expression" ? "disabled" : ""}></label><span class="mode-note">${mode === "pool" ? `${selected} 项候选` : mode === "fixed" ? "使用固定提示词" : "不加入提示词"}</span></div>
-      <label class="field dimension-fixed"><span>固定提示词</span><input type="text" value="${escapeHtml(draft.fixed[section] || "")}" data-fixed="${section}" placeholder="留空则不加入" ${mode !== "fixed" ? "disabled" : ""}></label>`;
+      <label class="field dimension-fixed"><span>固定提示词</span><textarea rows="1" data-fixed="${section}" placeholder="留空则不加入" ${mode !== "fixed" ? "disabled" : ""}>${escapeHtml(draft.fixed[section] || "")}</textarea></label>`;
       article.querySelectorAll("[data-mode]").forEach((button) =>
         button.addEventListener("click", () => {
           draft.modes[section] = button.dataset.mode;
@@ -991,11 +1181,23 @@ function renderDimensions() {
         updatePoseConflict();
       });
       const fixedInput = article.querySelector("[data-fixed]");
+      // 输入时同步草稿并触发高度伸缩
       fixedInput.addEventListener("input", (event) => {
         draft.fixed[section] = event.target.value;
+        autoResizeFixedPrompt(fixedInput);
         schedulePersist();
       });
+      // 失焦规范化 Anima Tag
       fixedInput.addEventListener("blur", () => normalizePromptElement(fixedInput));
+      // 快捷键体验优化：Ctrl+Enter 或 Cmd+Enter 直接触发生成
+      fixedInput.addEventListener("keydown", (event) => {
+        if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+          event.preventDefault();
+          ui.settingsForm.requestSubmit();
+        }
+      });
+      // 挂载前/后执行一次高度自适应，保证历史记录或草稿还原时多行内容立刻撑开
+      requestAnimationFrame(() => autoResizeFixedPrompt(fixedInput));
       article.querySelector("[data-manage]").addEventListener("click", () => openPool(section));
       return article;
     }),
@@ -1040,6 +1242,17 @@ function promptTokens(value) {
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
+}
+/**
+ * 固定提示词自适应高度调整
+ * @param {HTMLTextAreaElement} textarea
+ */
+function autoResizeFixedPrompt(textarea) {
+  if (!textarea) return;
+  // 先将高度重置为 auto，才能准确计算内容减少（删除文字）时的 scrollHeight
+  textarea.style.height = "auto";
+  // 加上边框容差，确保内容不出现意外微抖动
+  textarea.style.height = `${Math.max(35, textarea.scrollHeight)}px`;
 }
 function triggerIdentity(value) {
   return String(value || "").trim().toLocaleLowerCase();
@@ -1403,6 +1616,8 @@ function renderBatch(batch, queue = currentQueue) {
   if (batch && !active && lastTerminalBatch !== `${batch.id}:${batch.status}:${completed}`) {
     lastTerminalBatch = `${batch.id}:${batch.status}:${completed}`;
     loadHistory(1);
+    // 批次结束后新图片已入库,同步刷新胶囊栏计数。
+    loadGalleryCollections();
   }
 }
 async function refreshConnection() {
@@ -1436,15 +1651,551 @@ async function pollBatch() {
     }
   }
 }
+const DEFAULT_COLLECTION_ID = 1;
+
+function isDefaultFavorite(record) {
+  const ids = Array.isArray(record?.collection_ids) ? record.collection_ids : [];
+  return ids.some((value) => Number(value) === DEFAULT_COLLECTION_ID);
+}
+
+// 同步本地分页缓存中的收藏状态,避免翻页后星标回退成旧值。
+function syncCachedCollections(imageId, collectionIds) {
+  const target = Number(imageId);
+  const ids = Array.isArray(collectionIds) ? collectionIds.map(Number) : [];
+  for (const data of historyCache.values()) {
+    const items = Array.isArray(data?.items) ? data.items : [];
+    for (const item of items) {
+      if (Number(item?.id) === target) item.collection_ids = [...ids];
+    }
+  }
+  if (Array.isArray(historyItems)) {
+    for (const item of historyItems) {
+      if (Number(item?.id) === target) item.collection_ids = [...ids];
+    }
+  }
+  if (selectedRecord && Number(selectedRecord.id) === target) {
+    selectedRecord.collection_ids = [...ids];
+  }
+}
+
+// 就地刷新当前画廊中该作品的星标(不重建卡片,避免布局跳动)。
+function paintCardFavorite(imageId, favorite) {
+  const target = String(imageId);
+  for (const star of ui.gallery.querySelectorAll(".image-favorite-star")) {
+    if (star.dataset.imageId !== target) continue;
+    paintFavoriteStar(star, favorite);
+  }
+}
+
+// 收藏夹徽标计数增量更新:delta 为 +1/-1,避免每次点星都全量拉取。
+function adjustCollectionCount(collectionId, delta) {
+  const target = Number(collectionId);
+  if (!Number.isFinite(target) || !delta) return;
+  const collection = galleryCollections.find((item) => Number(item.id) === target);
+  if (!collection) return;
+  collection.item_count = Math.max(0, Number(collection.item_count || 0) + delta);
+  renderGalleryCollections();
+}
+
+function paintFavoriteStar(star, favorite) {
+  star.dataset.favorite = favorite ? "true" : "false";
+  star.setAttribute("aria-pressed", favorite ? "true" : "false");
+  star.title = favorite ? "取消收藏" : "收藏";
+}
+
+async function toggleDefaultFavorite(record, star) {
+  const previous = isDefaultFavorite(record);
+  const optimistic = !previous;
+  // 乐观更新:先点亮/熄灭并播放微弹跳,再等待服务端确认。
+  paintFavoriteStar(star, optimistic);
+  star.classList.remove("is-popping");
+  void star.offsetWidth;
+  star.classList.add("is-popping");
+  try {
+    const result = await request(`/api/history/${record.id}/toggle-default-favorite`, {
+      method: "POST",
+    });
+    const favorite = Boolean(result?.is_favorite);
+    const ids = Array.isArray(result?.collection_ids) ? result.collection_ids : [];
+    paintFavoriteStar(star, favorite);
+    syncCachedCollections(record.id, ids);
+    // 顶部“默认收藏”胶囊徽标即时 +1/-1;当前视图中的卡片保持原地,仅星标置灰。
+    if (favorite !== previous) adjustCollectionCount(DEFAULT_COLLECTION_ID, favorite ? 1 : -1);
+  } catch (error) {
+    // 失败回滚:恢复点击前的星标状态,并提示原因。
+    paintFavoriteStar(star, previous);
+    toast(error.message);
+  }
+}
+
+// ---------- 批量管理:状态机与选择逻辑 ----------
+// 设计要点:
+// 1) isBatchMode 为唯一模式开关,所有入口(按钮/卡片/复选框)都经由 setBatchMode 收敛;
+// 2) selectedBatchIds 跨页保留,但只对当前页可见卡片做视觉同步,避免误删不可见项;
+// 3) Shift 连选以 lastBatchAnchorId 为锚点,在当前页顺序内做闭区间选择。
+
+function batchCardElements() {
+  if (!ui.gallery) return [];
+  return [...ui.gallery.querySelectorAll(".image-card")];
+}
+
+// 当前页可见的作品 id 顺序(与 DOM 顺序一致,保证 Shift 区间语义正确)。
+function batchPageIds() {
+  return batchCardElements()
+    .map((element) => Number(element.dataset.imageId))
+    .filter((value) => Number.isFinite(value) && value > 0);
+}
+
+function paintBatchCard(article, imageId) {
+  if (!article) return;
+  const selected = selectedBatchIds.has(Number(imageId));
+  article.classList.toggle("is-selected", selected);
+  const check = article.querySelector(".batch-check");
+  if (check) {
+    check.setAttribute("aria-checked", selected ? "true" : "false");
+    check.title = selected ? "取消选择" : "选择此作品";
+  }
+}
+
+// 就地刷新所有卡片的选中态,不重建 DOM(避免图片重新加载与布局跳动)。
+function paintBatchSelection() {
+  for (const article of batchCardElements()) {
+    paintBatchCard(article, Number(article.dataset.imageId));
+  }
+  updateBatchActionBar();
+}
+
+function updateBatchActionBar() {
+  const count = selectedBatchIds.size;
+  if (ui.batchSelectedCount) ui.batchSelectedCount.textContent = String(count);
+  const pageIds = batchPageIds();
+  const allSelected = pageIds.length > 0 && pageIds.every((id) => selectedBatchIds.has(id));
+  if (ui.batchSelectAll) {
+    ui.batchSelectAll.textContent = allSelected ? "取消全选" : "全选本页";
+    ui.batchSelectAll.disabled = pageIds.length === 0;
+    ui.batchSelectAll.setAttribute("aria-pressed", allSelected ? "true" : "false");
+  }
+  const empty = count === 0;
+  for (const button of [ui.batchExport, ui.batchFavorite, ui.batchDelete]) {
+    if (button) button.disabled = empty || batchBusy;
+  }
+  if (ui.batchClearSelection) ui.batchClearSelection.disabled = empty || batchBusy;
+  if (ui.batchExit) ui.batchExit.disabled = batchBusy;
+  if (ui.batchActionBar) ui.batchActionBar.classList.toggle("is-busy", batchBusy);
+}
+
+function showBatchActionBar() {
+  if (!ui.batchActionBar) return;
+  clearTimeout(batchBarHideTimer);
+  ui.batchActionBar.hidden = false;
+  ui.batchActionBar.classList.remove("is-leaving");
+  ui.batchActionBar.setAttribute("aria-hidden", "false");
+  // 重新触发入场动画(隐藏后再次显示时 CSS 动画不会自动重播)。
+  void ui.batchActionBar.offsetWidth;
+}
+
+function hideBatchActionBar() {
+  if (!ui.batchActionBar || ui.batchActionBar.hidden) return;
+  ui.batchActionBar.setAttribute("aria-hidden", "true");
+  if (imagePreviewReducedMotion()) {
+    ui.batchActionBar.hidden = true;
+    return;
+  }
+  ui.batchActionBar.classList.add("is-leaving");
+  clearTimeout(batchBarHideTimer);
+  batchBarHideTimer = setTimeout(() => {
+    ui.batchActionBar.hidden = true;
+    ui.batchActionBar.classList.remove("is-leaving");
+  }, 230);
+}
+
+function setBatchMode(enabled) {
+  const next = Boolean(enabled);
+  if (next === isBatchMode) return;
+  isBatchMode = next;
+  // 全局状态类名,便于样式级联(如 body.is-batch-mode .command-deck)。
+  document.body.classList.toggle("is-batch-mode", isBatchMode);
+  // 生图控制台与批量操作栏互斥:批量模式下平滑下移收起,退出时复位。
+  const deck = ui.commandDeck || document.querySelector(".command-deck");
+  if (deck) {
+    deck.classList.toggle("is-batch-hidden", isBatchMode);
+    deck.setAttribute("aria-hidden", String(isBatchMode));
+  }
+  if (ui.gallery) ui.gallery.classList.toggle("is-batch-mode", isBatchMode);
+  if (ui.btnToggleBatchMode) {
+    ui.btnToggleBatchMode.setAttribute("aria-pressed", isBatchMode ? "true" : "false");
+    ui.btnToggleBatchMode.title = isBatchMode ? "退出批量管理" : "批量管理作品";
+    const label = ui.btnToggleBatchMode.querySelector("span");
+    if (label) label.textContent = isBatchMode ? "退出批量" : "批量管理";
+  }
+  if (isBatchMode) {
+    showBatchActionBar();
+    paintBatchSelection();
+  } else {
+    // 退出时清空选择并复位锚点,避免下次进入残留旧状态。
+    selectedBatchIds.clear();
+    lastBatchAnchorId = null;
+    // 批量弹窗若仍打开,一并复位关闭,避免上下文悬挂。
+    if (batchFavoriteContext && ui.imageCollectionsDialog?.open) closeBatchFavoriteDialog();
+    if (batchDeleteContext && ui.recordDeleteDialog?.open) closeBatchDeleteDialog();
+    paintBatchSelection();
+    hideBatchActionBar();
+  }
+}
+
+function toggleBatchSelection(imageId, { shiftKey = false } = {}) {
+  const target = Number(imageId);
+  if (!Number.isFinite(target) || target <= 0) return;
+  if (!isBatchMode) setBatchMode(true);
+
+  if (shiftKey && lastBatchAnchorId !== null) {
+    const pageIds = batchPageIds();
+    const from = pageIds.indexOf(lastBatchAnchorId);
+    const to = pageIds.indexOf(target);
+    if (from >= 0 && to >= 0) {
+      // 区间连选:以锚点当前状态为准,整段统一为“选中”或“取消”。
+      const shouldSelect = !selectedBatchIds.has(target);
+      const [start, end] = from <= to ? [from, to] : [to, from];
+      for (let index = start; index <= end; index += 1) {
+        if (shouldSelect) selectedBatchIds.add(pageIds[index]);
+        else selectedBatchIds.delete(pageIds[index]);
+      }
+      lastBatchAnchorId = target;
+      paintBatchSelection();
+      return;
+    }
+  }
+
+  if (selectedBatchIds.has(target)) selectedBatchIds.delete(target);
+  else selectedBatchIds.add(target);
+  lastBatchAnchorId = target;
+  paintBatchSelection();
+}
+
+function selectAllBatchPage() {
+  const pageIds = batchPageIds();
+  if (!pageIds.length) return;
+  const allSelected = pageIds.every((id) => selectedBatchIds.has(id));
+  for (const id of pageIds) {
+    if (allSelected) selectedBatchIds.delete(id);
+    else selectedBatchIds.add(id);
+  }
+  lastBatchAnchorId = allSelected ? null : pageIds[pageIds.length - 1];
+  paintBatchSelection();
+}
+
+function clearBatchSelection() {
+  selectedBatchIds.clear();
+  lastBatchAnchorId = null;
+  paintBatchSelection();
+}
+
+// 批量请求统一入口:锁定操作条、串行执行、结束后刷新选择态。
+// 失败时优先回显到调用方指定的弹窗错误区(如批量删除/收藏弹窗),否则退化为 toast。
+async function runBatchTask(task, { onError } = {}) {
+  if (batchBusy) return;
+  batchBusy = true;
+  updateBatchActionBar();
+  try {
+    await task();
+  } catch (error) {
+    const message = error?.message || "批量操作失败";
+    if (typeof onError === "function") onError(message);
+    else toast(message);
+  } finally {
+    batchBusy = false;
+    updateBatchActionBar();
+  }
+}
+
+// 批量导出前自动检测导出目录:本地缓存为空时先向后端拉取一次,
+// 仍未配置才唤起系统选目录弹窗,避免“已配置却误提示未设置”。
+async function ensureBatchExportFolder() {
+  if (currentExportFolder) return true;
+  try {
+    const data = await request("/api/settings/export-folder");
+    currentExportFolder = data?.export_dir || "";
+    renderExportFolderWidget();
+  } catch (error) {
+    console.error("检测导出目录失败:", error);
+  }
+  if (currentExportFolder) return true;
+  toast("尚未配置导出目录，请先选择目标文件夹");
+  return triggerPickExportFolder();
+}
+
+async function batchExportSelected() {
+  const ids = [...selectedBatchIds];
+  if (!ids.length || batchBusy) return;
+  const ready = await ensureBatchExportFolder();
+  if (!ready) return;
+  await runBatchTask(async () => {
+    const result = await request("/api/history/batch-export", {
+      method: "POST",
+      body: JSON.stringify({ image_ids: ids }),
+    });
+    const exported = Number(result?.exported_count || 0);
+    const failed = Number(result?.failed_count || 0);
+    if (!exported && failed) {
+      toast(`导出失败：${failed} 张作品均未能导出`);
+      return;
+    }
+    toast(
+      failed
+        ? `已导出 ${exported} 张，${failed} 张失败`
+        : `已导出 ${exported} 张到 ${result?.folder_name || "导出目录"}`,
+    );
+  });
+}
+
+// ---------- 批量收藏:复用 #imageCollectionsDialog ----------
+// batchFavoriteContext 非空时,弹窗进入“批量模式”:勾选状态取所选作品的交集,
+// 保存时调用 /api/history/batch-collections 的 set 模式统一覆盖归属。
+let batchFavoriteContext = null;
+
+function batchSelectedRecords() {
+  const wanted = new Set([...selectedBatchIds].map(Number));
+  return historyItems.filter((item) => wanted.has(Number(item.id)));
+}
+
+function openBatchFavoriteDialog() {
+  const records = batchSelectedRecords();
+  if (!records.length) {
+    toast("请先选择要收藏的作品");
+    return;
+  }
+  batchFavoriteContext = { ids: records.map((item) => Number(item.id)) };
+  setImageCollectionsError("");
+  if (ui.newCollectionNameInput) ui.newCollectionNameInput.value = "";
+  // 交集语义:仅当所有选中作品都已在某收藏夹时才默认勾选,避免误覆盖。
+  const intersection = records.reduce((acc, record) => {
+    const ids = new Set(
+      (Array.isArray(record.collection_ids) ? record.collection_ids : []).map(Number),
+    );
+    return acc === null ? ids : new Set([...acc].filter((id) => ids.has(id)));
+  }, null);
+  renderImageCollectionsChecklist([...(intersection || [])]);
+  const hint = ui.imageCollectionsDialog?.querySelector(".import-hint");
+  if (hint) hint.textContent = `已选 ${records.length} 张作品，勾选要归入的收藏夹（保存后将覆盖这些作品的收藏归属）：`;
+  // 批量模式语义是“归属管理”,标题需与单图“添加到收藏夹”区分。
+  const title = ui.imageCollectionsDialog?.querySelector(".dialog-heading h2");
+  if (title) title.textContent = "管理收藏归属";
+  // 依据交集勾选结果初始化警告与保存按钮状态。
+  updateBatchCollectionsState();
+  ui.imageCollectionsDialog.showModal();
+}
+
+function closeBatchFavoriteDialog() {
+  batchFavoriteContext = null;
+  const hint = ui.imageCollectionsDialog?.querySelector(".import-hint");
+  if (hint) hint.textContent = "勾选此作品加入的收藏夹，可同时归入多个分类：";
+  const title = ui.imageCollectionsDialog?.querySelector(".dialog-heading h2");
+  if (title) title.textContent = "添加到收藏夹";
+  // 复位警告与按钮,避免污染后续单图收藏界面。
+  resetBatchCollectionsState();
+  ui.imageCollectionsDialog.close();
+}
+
+// 批量模式下的警告与保存按钮联动:未勾选任何收藏夹时提示“移出全部收藏”并切换危险态。
+function updateBatchCollectionsState() {
+  if (!batchFavoriteContext) return;
+  const warning = ui.imageCollectionsBatchWarning || document.getElementById("imageCollectionsBatchWarning");
+  const saveBtn = ui.saveImageCollections;
+  const clearing = checkedImageCollectionIds().length === 0;
+
+  if (warning) warning.hidden = !clearing;
+  if (saveBtn) {
+    saveBtn.textContent = clearing ? "移出全部收藏" : "保存";
+    saveBtn.classList.toggle("danger", clearing);
+    saveBtn.classList.toggle("primary", !clearing);
+  }
+}
+
+function resetBatchCollectionsState() {
+  const warning = ui.imageCollectionsBatchWarning || document.getElementById("imageCollectionsBatchWarning");
+  const saveBtn = ui.saveImageCollections;
+  if (warning) warning.hidden = true;
+  if (saveBtn) {
+    saveBtn.textContent = "保存";
+    saveBtn.classList.remove("danger");
+    saveBtn.classList.add("primary");
+  }
+}
+
+async function saveBatchImageCollections() {
+  const context = batchFavoriteContext;
+  if (!context || imageCollectionsSaving) return;
+  const collectionIds = checkedImageCollectionIds();
+  // 后端 set 模式拒绝空 collection_ids:全部取消勾选时改用 remove 逐个清空,
+  // 语义等价于“把这些作品移出所有收藏夹”。二次确认已由弹窗内联警告与危险按钮承担。
+  const clearing = collectionIds.length === 0;
+  imageCollectionsSaving = true;
+  if (ui.saveImageCollections) ui.saveImageCollections.disabled = true;
+  setImageCollectionsError("");
+  try {
+    const result = await request("/api/history/batch-collections", {
+      method: "POST",
+      body: JSON.stringify({
+        image_ids: context.ids,
+        collection_ids: clearing
+          ? galleryCollections.map((item) => Number(item.id)).filter((id) => id > 0)
+          : collectionIds,
+        mode: clearing ? "remove" : "set",
+      }),
+    });
+    const updated = Array.isArray(result?.updated) ? result.updated.map(Number) : context.ids;
+    // 本地缓存与卡片星标同步,避免等待整页重载。
+    for (const id of updated) {
+      syncCachedCollections(id, collectionIds);
+      paintCardFavorite(id, collectionIds.includes(DEFAULT_COLLECTION_ID));
+    }
+    closeBatchFavoriteDialog();
+    // 全库数量与各收藏夹徽标必须全量刷新:set/remove 可能同时影响多个收藏夹。
+    await loadGalleryCollections();
+    // 当前正停留在某个收藏夹视图时,归属变化会让列表内容失效,需重新拉取。
+    if (activeCollectionId !== 0) await loadHistory(historyPage);
+    toast(
+      clearing
+        ? `已将 ${updated.length} 张作品移出全部收藏夹`
+        : `已更新 ${updated.length} 张作品的收藏归属`,
+    );
+  } catch (error) {
+    setImageCollectionsError(error.message || "批量收藏失败");
+  } finally {
+    imageCollectionsSaving = false;
+    if (ui.saveImageCollections) ui.saveImageCollections.disabled = false;
+  }
+}
+
+// ---------- 批量删除:复用 #recordDeleteDialog ----------
+let batchDeleteContext = null;
+
+function setRecordDeleteError(message = "") {
+  if (!ui.recordDeleteError) return;
+  ui.recordDeleteError.textContent = message;
+  ui.recordDeleteError.hidden = !message;
+}
+
+function openBatchDeleteDialog() {
+  const ids = [...selectedBatchIds];
+  if (!ids.length) {
+    toast("请先选择要删除的作品");
+    return;
+  }
+  batchDeleteContext = { ids };
+  ui.recordDeleteSummary.textContent = `已选 ${ids.length} 张作品`;
+  const warning = ui.recordDeleteDialog?.querySelector(".record-delete-warning");
+  if (warning) {
+    warning.textContent = `⚠️ 确定要删除已选的 ${ids.length} 张作品吗？此操作将同步永久删除本地物理图片文件，不可撤销。`;
+  }
+  const title = ui.recordDeleteDialog?.querySelector(".dialog-heading h2");
+  if (title) title.textContent = "批量删除作品";
+  setRecordDeleteError("");
+  ui.confirmRecordDelete.disabled = false;
+  ui.confirmRecordDelete.textContent = "确认删除";
+  ui.recordDeleteDialog.showModal();
+}
+
+function closeBatchDeleteDialog() {
+  batchDeleteContext = null;
+  const warning = ui.recordDeleteDialog?.querySelector(".record-delete-warning");
+  if (warning) {
+    warning.textContent = "⚠️ 确定要删除该作品吗？此操作将同步永久删除本地物理图片文件，不可撤销。";
+  }
+  const title = ui.recordDeleteDialog?.querySelector(".dialog-heading h2");
+  if (title) title.textContent = "删除作品";
+  ui.recordDeleteDialog.close();
+}
+
+async function submitBatchDelete() {
+  const context = batchDeleteContext;
+  if (!context || ui.confirmRecordDelete.disabled) return;
+  const ids = [...context.ids];
+  ui.confirmRecordDelete.disabled = true;
+  ui.confirmRecordDelete.textContent = "正在删除...";
+  setRecordDeleteError("");
+  await runBatchTask(
+    async () => {
+      const result = await request("/api/history/batch-delete", {
+        method: "POST",
+        body: JSON.stringify({ image_ids: ids }),
+      });
+      // 后端 deleted 为实际删除的记录行数(整数),兼容旧版数组返回。
+      const deleted = Array.isArray(result?.deleted)
+        ? result.deleted.length
+        : Number(result?.deleted ?? ids.length);
+      for (const id of ids) selectedBatchIds.delete(Number(id));
+      lastBatchAnchorId = null;
+      closeBatchDeleteDialog();
+      // 删除后当前页可能已空:先按剩余数量推算目标页,再由后端 pages 兜底校正。
+      const remaining = Math.max(0, historyItems.length - deleted);
+      const targetPage = remaining === 0 && historyPage > 1 ? historyPage - 1 : historyPage;
+      await loadHistory(targetPage);
+      // 若目标页仍越界(跨页选择导致删空多页),继续向前回退直到有内容或到第 1 页。
+      // 每轮必须严格递减页码,避免请求失败时 historyPage 不变导致死循环。
+      let guard = historyPages + 1;
+      while (historyItems.length === 0 && historyPage > 1 && guard-- > 0) {
+        const previousPage = historyPage - 1;
+        await loadHistory(previousPage);
+        if (historyPage >= previousPage) break;
+      }
+      await loadGalleryCollections();
+      paintBatchSelection();
+      toast(`已删除 ${deleted} 张作品`);
+    },
+    {
+      onError: (message) => {
+        // 文件锁等致命错误:整批未提交,弹窗保持打开并回显原因。
+        setRecordDeleteError(message);
+      },
+    },
+  );
+  ui.confirmRecordDelete.disabled = false;
+  ui.confirmRecordDelete.textContent = "确认删除";
+}
+
 function card(record, index) {
   const article = document.createElement("article");
   article.className = "image-card is-loading";
+  article.dataset.imageId = String(record.id);
   article.style.animationDelay = `${Math.min(index * 25, 250)}ms`;
   const button = document.createElement("button");
   button.type = "button";
   button.setAttribute("aria-label", `查看 ${record.filename || "生成结果"}`);
-  button.innerHTML = `<img loading="lazy" decoding="async" fetchpriority="low" src="/api/images/${record.id}" alt="Anima 生成结果"><span class="image-failure" hidden>图片加载失败</span><div class="card-copy"><strong>${escapeHtml(record.filename)}</strong><span>#${record.sequence} · Seed ${record.sample_seed}</span></div>`;
-  button.addEventListener("click", () => openDetail(record));
+  button.innerHTML = `<img loading="lazy" decoding="async" fetchpriority="low" src="/api/images/${record.id}" alt="Anima 生成结果"><span class="image-failure" hidden>图片加载失败</span><div class="card-copy"><div class="card-copy-text"><strong>${escapeHtml(record.filename)}</strong><span>#${record.sequence} · Seed ${record.sample_seed}</span></div><button type="button" class="image-favorite-star" aria-pressed="false" title="收藏">★</button></div>`;
+  button.addEventListener("click", (event) => {
+    // 批量模式下点击卡片 = 切换勾选,绝不弹出详情弹窗。
+    if (isBatchMode) {
+      event.preventDefault();
+      toggleBatchSelection(record.id, { shiftKey: event.shiftKey });
+      return;
+    }
+    openDetail(record);
+  });
+  // 复选框是卡片按钮内的独立控件:阻止冒泡,避免重复触发卡片点击逻辑。
+  const check = document.createElement("button");
+  check.type = "button";
+  check.className = "batch-check";
+  check.setAttribute("role", "checkbox");
+  check.setAttribute("aria-checked", "false");
+  check.setAttribute("aria-label", `选择 ${record.filename || "生成结果"}`);
+  check.tabIndex = -1;
+  check.addEventListener("click", (event) => {
+    event.stopPropagation();
+    event.preventDefault();
+    toggleBatchSelection(record.id, { shiftKey: event.shiftKey });
+  });
+  article.append(check);
+  paintBatchCard(article, record.id);
+  const star = button.querySelector(".image-favorite-star");
+  star.dataset.imageId = String(record.id);
+  paintFavoriteStar(star, isDefaultFavorite(record));
+  star.addEventListener("click", (event) => {
+    // 星标是卡片按钮内的独立控件:必须阻止冒泡,否则会打开详情弹窗。
+    event.stopPropagation();
+    event.preventDefault();
+    toggleDefaultFavorite(record, star);
+  });
   const image = button.querySelector("img");
   const markLoaded = () => {
     article.classList.remove("is-loading");
@@ -1465,9 +2216,18 @@ function card(record, index) {
   return article;
 }
 let historyRequest = 0;
-function cacheHistoryPage(data) {
+// 缓存 Key 必须包含收藏夹维度,否则“全部”与各收藏夹的分页数据会互相覆盖。
+function historyCacheKey(page, collectionId = activeCollectionId) {
+  return `${Number(collectionId) || 0}_${Number(page) || 1}`;
+}
+
+function cacheHistoryPage(data, collectionId = activeCollectionId) {
   if (!data || !Number.isFinite(Number(data.page))) return;
-  historyCache.set(Number(data.page), data);
+  historyCache.set(historyCacheKey(data.page, collectionId), data);
+}
+
+function cachedHistoryPage(page, collectionId = activeCollectionId) {
+  return historyCache.get(historyCacheKey(page, collectionId)) || null;
 }
 
 function renderHistoryPage(data) {
@@ -1477,24 +2237,390 @@ function renderHistoryPage(data) {
   cacheHistoryPage(data);
   ui.gallery.replaceChildren(...historyItems.map(card));
   ui.emptyState.hidden = historyItems.length > 0;
+  // 空状态文案按当前视图区分:收藏夹为空与全库为空语义不同。
+  if (ui.emptyState && historyItems.length === 0) {
+    const title = ui.emptyState.querySelector("strong");
+    const hint = ui.emptyState.querySelector("small");
+    if (activeCollectionId === 0) {
+      if (title) title.textContent = "等待第一张作品";
+      if (hint) hint.textContent = "完成生成后会出现在这里";
+    } else {
+      if (title) title.textContent = "这个收藏夹还是空的";
+      if (hint) hint.textContent = "在作品详情中点击“收藏至...”即可加入";
+    }
+  }
   ui.pageLabel.textContent = `${historyPage} / ${historyPages}`;
   ui.prevPage.disabled = historyPage <= 1;
   ui.nextPage.disabled = historyPage >= historyPages;
   ui.historyCount.textContent = `${data.total || 0} 张图片`;
   ui.galleryCount.textContent = String(data.total || 0);
+  // 历史列表分页更新(生图完成、翻页、删除)时,同步“全部”胶囊徽标。
+  const allPillBadge = document.querySelector("#galleryCollectionsBar .pill-all .pill-badge");
+  if (allPillBadge && activeCollectionId === 0) {
+    allPillBadge.textContent = String(data.total || 0);
+  }
   updatePreviewNavigation();
+  updateDetailNavigation();
+  // 翻页/刷新后重新同步批量模式视觉状态:选择集合跨页保留,但只高亮当前页可见项。
+  if (isBatchMode) {
+    ui.gallery.classList.add("is-batch-mode");
+    paintBatchSelection();
+  }
 }
 
 async function loadHistory(page = historyPage) {
   // 与 loadPool 相同的竞态守卫:快速翻页时丢弃乱序到达的旧响应。
   const requestId = ++historyRequest;
+  const collectionId = activeCollectionId;
   try {
-    const data = await request(`/api/history?page=${page}&limit=24`);
+    const data = await request(
+      `/api/history?page=${page}&limit=24&collection_id=${collectionId}`,
+    );
     if (requestId !== historyRequest) return;
+    // “全部”视图的总数即全库总数,顺手同步胶囊数据源,保证翻页/生图后徽标一致。
+    if (collectionId === 0 && Number.isFinite(Number(data?.total))) {
+      galleryAllTotal = Math.max(0, Number(data.total));
+    }
     renderHistoryPage(data);
   } catch (error) {
     if (requestId !== historyRequest) return;
     toast(error.message);
+  }
+}
+
+// ---------- 收藏夹胶囊栏通用交互:滚轮横向桥接 / 溢出遮罩 / 新建后聚焦 ----------
+// 普通鼠标纵向滚轮在隐藏滚动条的胶囊栏上无法触发横向滚动,这里将 deltaY 转置为 scrollLeft。
+function attachHorizontalScroll(element) {
+  if (!element || element.dataset.horizontalScrollBound === "1") return;
+  element.dataset.horizontalScrollBound = "1";
+  element.addEventListener(
+    "wheel",
+    (event) => {
+      // 存在纵向滚动且无横向位移时进行转置。
+      if (Math.abs(event.deltaY) > Math.abs(event.deltaX)) {
+        event.preventDefault();
+        element.scrollLeft += event.deltaY * 0.9;
+      }
+    },
+    { passive: false },
+  );
+}
+
+// 依据滚动位置切换两端渐变遮罩,直观提示左右仍有未完全展现的收藏夹。
+function syncCollectionsOverflow(element) {
+  if (!element) return;
+  const wrapper = element.closest(".collections-bar-wrapper");
+  if (!wrapper) return;
+  const maxScroll = element.scrollWidth - element.clientWidth;
+  const hasOverflow = maxScroll > 1;
+  wrapper.classList.toggle("has-overflow-start", hasOverflow && element.scrollLeft > 1);
+  wrapper.classList.toggle("has-overflow-end", hasOverflow && element.scrollLeft < maxScroll - 1);
+}
+
+// 新建收藏夹后平滑滚动至最右端,确保新分类胶囊进入视野。
+function scrollCollectionsToEnd(element) {
+  if (!element) return;
+  element.scrollTo({ left: element.scrollWidth, behavior: "smooth" });
+  syncCollectionsOverflow(element);
+}
+
+function bindCollectionsBar(element) {
+  if (!element) return;
+  attachHorizontalScroll(element);
+  if (element.dataset.overflowBound !== "1") {
+    element.dataset.overflowBound = "1";
+    element.addEventListener("scroll", () => syncCollectionsOverflow(element), { passive: true });
+    if (typeof ResizeObserver === "function") {
+      const observer = new ResizeObserver(() => syncCollectionsOverflow(element));
+      observer.observe(element);
+    }
+  }
+  syncCollectionsOverflow(element);
+}
+
+// ---------- 作品库二级筛选胶囊栏 ----------
+async function loadGalleryCollections() {
+  const requestId = ++galleryCollectionsRequest;
+  try {
+    const payload = await request("/api/gallery/collections");
+    if (requestId !== galleryCollectionsRequest) return;
+    // 新结构为 { all_total, collections };兼容旧版 { items } 返回。
+    const collections = Array.isArray(payload?.collections)
+      ? payload.collections
+      : Array.isArray(payload?.items)
+        ? payload.items
+        : [];
+    galleryCollections = collections;
+    const allTotal = Number(payload?.all_total);
+    if (Number.isFinite(allTotal)) {
+      galleryAllTotal = Math.max(0, allTotal);
+    } else {
+      // 兼容旧版接口:退化为“全部”视图缓存总数,再退化为各收藏夹计数之和。
+      const allData = cachedHistoryPage(1, 0);
+      galleryAllTotal = Number.isFinite(Number(allData?.total))
+        ? Number(allData.total)
+        : galleryCollections.reduce((sum, item) => sum + Number(item.item_count || 0), 0);
+    }
+    // 当前激活的收藏夹若已被删除,自动回落到“全部作品”。
+    if (
+      activeCollectionId !== 0 &&
+      !galleryCollections.some((item) => Number(item.id) === activeCollectionId)
+    ) {
+      activeCollectionId = 0;
+    }
+    renderGalleryCollections();
+  } catch (error) {
+    if (requestId !== galleryCollectionsRequest) return;
+    toast(error.message);
+  }
+}
+
+function galleryTotalCount() {
+  // “全部”徽标只使用后端返回的全库总数,严禁用各收藏夹计数累加(会重复计数且时序不稳)。
+  return Math.max(0, Number(galleryAllTotal) || 0);
+}
+
+function createCollectionPill({ id, icon, name, count, active, deletable }) {
+  const pill = document.createElement("button");
+  pill.type = "button";
+  pill.className = "collection-pill";
+  // “全部”胶囊附加 pill-all 类,便于 renderHistoryPage 就地更新其徽标。
+  if (Number(id) === 0) pill.classList.add("pill-all");
+  pill.dataset.collectionId = String(id);
+  pill.setAttribute("aria-pressed", active ? "true" : "false");
+  if (active) pill.classList.add("active");
+  const iconSpan = document.createElement("span");
+  iconSpan.className = "collection-pill-icon";
+  iconSpan.setAttribute("aria-hidden", "true");
+  iconSpan.textContent = icon;
+  const nameSpan = document.createElement("span");
+  nameSpan.className = "collection-pill-name";
+  nameSpan.textContent = name;
+  const badge = document.createElement("span");
+  badge.className = "pill-badge";
+  badge.textContent = String(count);
+  pill.append(iconSpan, nameSpan, badge);
+  pill.addEventListener("click", () => selectGalleryCollection(id));
+  if (deletable) {
+    const menu = document.createElement("button");
+    menu.type = "button";
+    menu.className = "collection-pill-menu";
+    menu.title = `删除收藏夹“${name}”`;
+    menu.setAttribute("aria-label", `删除收藏夹 ${name}`);
+    menu.textContent = "···";
+    menu.addEventListener("click", (event) => {
+      event.stopPropagation();
+      event.preventDefault();
+      deleteGalleryCollection(id, name);
+    });
+    pill.append(menu);
+  }
+  return pill;
+}
+
+function renderGalleryCollections() {
+  if (!ui.galleryCollectionsBar) return;
+  const pills = [
+    createCollectionPill({
+      id: 0,
+      icon: "▦",
+      name: "全部",
+      count: galleryTotalCount(),
+      active: activeCollectionId === 0,
+      deletable: false,
+    }),
+  ];
+  const ordered = [...galleryCollections].sort((a, b) => {
+    const defaultDelta = Number(Boolean(b.is_default)) - Number(Boolean(a.is_default));
+    if (defaultDelta) return defaultDelta;
+    return Number(a.sort_order || 0) - Number(b.sort_order || 0) || Number(a.id) - Number(b.id);
+  });
+  for (const collection of ordered) {
+    const id = Number(collection.id);
+    pills.push(
+      createCollectionPill({
+        id,
+        icon: collection.is_default ? "★" : "📁",
+        name: String(collection.name || "未命名"),
+        count: Number(collection.item_count || 0),
+        active: activeCollectionId === id,
+        deletable: !collection.is_default,
+      }),
+    );
+  }
+  // 新建入口已改为右侧常驻静态按钮(#btnGalleryAddCollection),不再随胶囊列表滚动。
+  ui.galleryCollectionsBar.replaceChildren(...pills);
+  syncCollectionsOverflow(ui.galleryCollectionsBar);
+}
+
+function selectGalleryCollection(collectionId) {
+  const target = Number(collectionId) || 0;
+  if (target === activeCollectionId) return;
+  activeCollectionId = target;
+  renderGalleryCollections();
+  loadHistory(1);
+}
+
+async function createGalleryCollection() {
+  const name = window.prompt("新建收藏夹名称（最多 40 个字符）", "");
+  if (name === null) return;
+  const cleaned = name.trim();
+  if (!cleaned) {
+    toast("收藏夹名称不能为空");
+    return;
+  }
+  try {
+    const created = await request("/api/gallery/collections", {
+      method: "POST",
+      body: JSON.stringify({ name: cleaned }),
+    });
+    await loadGalleryCollections();
+    // 创建成功后自动切换到新收藏夹视图。
+    activeCollectionId = Number(created?.id) || 0;
+    renderGalleryCollections();
+    scrollCollectionsToEnd(ui.galleryCollectionsBar);
+    loadHistory(1);
+    toast(`已创建收藏夹“${cleaned}”`);
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+async function deleteGalleryCollection(collectionId, name) {
+  const target = Number(collectionId);
+  if (!Number.isFinite(target) || target <= 0) return;
+  if (!window.confirm(`确定删除收藏夹“${name}”吗？作品本身不会被删除。`)) return;
+  try {
+    await request(`/api/gallery/collections/${target}`, { method: "DELETE" });
+    if (activeCollectionId === target) activeCollectionId = 0;
+    await loadGalleryCollections();
+    loadHistory(1);
+    toast(`已删除收藏夹“${name}”`);
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+// ---------- 详情页“收藏至...”多选弹窗 ----------
+function setImageCollectionsError(message = "") {
+  if (!ui.imageCollectionsError) return;
+  ui.imageCollectionsError.textContent = message;
+  ui.imageCollectionsError.hidden = !message;
+}
+
+function renderImageCollectionsChecklist(checkedIds = []) {
+  if (!ui.imageCollectionsChecklist) return;
+  const checked = new Set(checkedIds.map(Number));
+  const ordered = [...galleryCollections].sort((a, b) => {
+    const defaultDelta = Number(Boolean(b.is_default)) - Number(Boolean(a.is_default));
+    if (defaultDelta) return defaultDelta;
+    return Number(a.sort_order || 0) - Number(b.sort_order || 0) || Number(a.id) - Number(b.id);
+  });
+  const rows = ordered.map((collection) => {
+    const id = Number(collection.id);
+    const label = document.createElement("label");
+    label.className = "favorite-group-check";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.value = String(id);
+    input.checked = checked.has(id);
+    const text = document.createElement("span");
+    text.textContent = `${collection.is_default ? "★ " : ""}${collection.name || "未命名"}`;
+    const count = document.createElement("small");
+    count.textContent = `${Number(collection.item_count || 0)} 张`;
+    count.style.marginLeft = "auto";
+    count.style.color = "var(--text-tertiary)";
+    label.append(input, text, count);
+    return label;
+  });
+  if (!rows.length) {
+    const empty = document.createElement("p");
+    empty.className = "import-hint";
+    empty.textContent = "暂无可用收藏夹，请先在下方新建。";
+    rows.push(empty);
+  }
+  ui.imageCollectionsChecklist.replaceChildren(...rows);
+}
+
+function openImageCollectionsDialog() {
+  if (!selectedRecord) return;
+  // 单图模式进入前复位批量态,防止上次批量操作残留的警告与危险按钮样式。
+  resetBatchCollectionsState();
+  setImageCollectionsError("");
+  if (ui.newCollectionNameInput) ui.newCollectionNameInput.value = "";
+  const ids = Array.isArray(selectedRecord.collection_ids) ? selectedRecord.collection_ids : [];
+  renderImageCollectionsChecklist(ids);
+  ui.imageCollectionsDialog.showModal();
+}
+
+function checkedImageCollectionIds() {
+  if (!ui.imageCollectionsChecklist) return [];
+  return [...ui.imageCollectionsChecklist.querySelectorAll('input[type="checkbox"]:checked')]
+    .map((input) => Number(input.value))
+    .filter((value) => Number.isFinite(value) && value > 0);
+}
+
+async function createAndCheckCollection() {
+  const input = ui.newCollectionNameInput;
+  const name = (input?.value || "").trim();
+  if (!name) {
+    setImageCollectionsError("请输入收藏夹名称");
+    input?.focus();
+    return;
+  }
+  if (ui.btnCreateAndCheckCollection) ui.btnCreateAndCheckCollection.disabled = true;
+  try {
+    const created = await request("/api/gallery/collections", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    });
+    await loadGalleryCollections();
+    const checked = checkedImageCollectionIds();
+    const createdId = Number(created?.id);
+    if (Number.isFinite(createdId) && !checked.includes(createdId)) checked.push(createdId);
+    renderImageCollectionsChecklist(checked);
+    if (input) input.value = "";
+    setImageCollectionsError("");
+    // 批量收藏弹窗中新建收藏夹:保留批量上下文与提示文案,不切回单图模式。
+    if (batchFavoriteContext) {
+      const hint = ui.imageCollectionsDialog?.querySelector(".import-hint");
+      if (hint) {
+        hint.textContent = `已选 ${batchFavoriteContext.ids.length} 张作品，勾选要归入的收藏夹（保存后将覆盖这些作品的收藏归属）：`;
+      }
+      // 新建项默认勾选,需同步刷新警告与保存按钮状态。
+      updateBatchCollectionsState();
+    }
+  } catch (error) {
+    setImageCollectionsError(error.message);
+  } finally {
+    if (ui.btnCreateAndCheckCollection) ui.btnCreateAndCheckCollection.disabled = false;
+  }
+}
+
+async function saveImageCollections() {
+  const record = selectedRecord;
+  if (!record || imageCollectionsSaving) return;
+  const collectionIds = checkedImageCollectionIds();
+  imageCollectionsSaving = true;
+  if (ui.saveImageCollections) ui.saveImageCollections.disabled = true;
+  setImageCollectionsError("");
+  try {
+    const result = await request(`/api/history/${record.id}/collections`, {
+      method: "POST",
+      body: JSON.stringify({ collection_ids: collectionIds }),
+    });
+    const updated = Array.isArray(result?.collection_ids) ? result.collection_ids : collectionIds;
+    syncCachedCollections(record.id, updated);
+    // 卡片星标与详情页状态双向联动。
+    paintCardFavorite(record.id, isDefaultFavorite(record));
+    ui.imageCollectionsDialog.close();
+    await loadGalleryCollections();
+    toast("已更新收藏归属");
+  } catch (error) {
+    setImageCollectionsError(error.message);
+  } finally {
+    imageCollectionsSaving = false;
+    if (ui.saveImageCollections) ui.saveImageCollections.disabled = false;
   }
 }
 
@@ -1530,7 +2656,72 @@ function openDetail(record) {
   closeRegenerationDrawers(false);
   renderDetail(record);
   updatePreviewNavigation();
+  updateDetailNavigation();
   ui.detailDialog.showModal();
+}
+
+let detailNavInFlight = false;
+
+// 状态更新：仅依据 selectedRecord 与相邻索引计算，绝不读取 imagePreview.phase
+function updateDetailNavigation() {
+  if (!selectedRecord) {
+    if (ui.detailPrevious) ui.detailPrevious.disabled = true;
+    if (ui.detailNext) ui.detailNext.disabled = true;
+    return;
+  }
+  const prevAvailable = previewNeighborAvailable(-1);
+  const nextAvailable = previewNeighborAvailable(1);
+  if (ui.detailPrevious) ui.detailPrevious.disabled = !prevAvailable;
+  if (ui.detailNext) ui.detailNext.disabled = !nextAvailable;
+}
+
+async function navigateDetail(direction) {
+  if (!ui.detailDialog.open || !selectedRecord || detailNavInFlight) return;
+  // 全屏原图预览打开时，方向键由全屏模块接管，此处忽略
+  if (imagePreview.phase !== "closed") return;
+
+  const location = selectedHistoryLocation();
+  let target = previewNeighbor(direction, location);
+  if (!target) return;
+
+  detailNavInFlight = true;
+  updateDetailNavigation();
+
+  try {
+    // 跨页处理：相邻图片若在未载入的上一页或下一页，发起异步获取
+    if (!target.record) {
+      if (ui.detailNavStatus) ui.detailNavStatus.textContent = "正在加载相邻作品…";
+      target.data = await loadHistoryPageForPreview(target.page);
+      const items = Array.isArray(target.data.items) ? target.data.items : [];
+      target.record = items[direction > 0 ? 0 : items.length - 1];
+      if (target.record && target.data) {
+        // 同步刷新底层画廊，保证翻页状态与页码一致
+        renderHistoryPage(target.data);
+      }
+    }
+
+    if (!target.record) return;
+
+    // 切图时重置当前可能展开的抽屉（避免上张图的变体/种子数据残留）
+    closeRegenerationDrawers(false);
+    regenerationOptions = null;
+
+    // 切换当前选中项并重新渲染详情面板
+    selectedRecord = target.record;
+    renderDetail(target.record);
+
+    if (ui.detailNavStatus) {
+      ui.detailNavStatus.textContent = `已切至 ${previewPositionLabel(target.record)}`;
+    }
+
+    // 后台静默预加载相邻原图缓存
+    preloadPreviewNeighbors();
+  } catch (error) {
+    toast(error.message || "切换作品失败");
+  } finally {
+    detailNavInFlight = false;
+    updateDetailNavigation();
+  }
 }
 
 const IMAGE_PREVIEW_MAX_ZOOM = 4;
@@ -1550,10 +2741,12 @@ function previewRecordIndex(record, items = historyItems) {
 function selectedHistoryLocation() {
   const currentIndex = previewRecordIndex(selectedRecord);
   if (currentIndex >= 0) return { page: historyPage, items: historyItems, index: currentIndex };
-  for (const [page, data] of historyCache) {
+  // 仅在当前收藏夹视图的缓存中查找,避免跨视图串页。
+  for (const [key, data] of historyCache) {
+    if (!String(key).startsWith(`${activeCollectionId}_`)) continue;
     const items = Array.isArray(data?.items) ? data.items : [];
     const index = previewRecordIndex(selectedRecord, items);
-    if (index >= 0) return { page, items, index };
+    if (index >= 0) return { page: Number(data.page) || 1, items, index };
   }
   return { page: historyPage, items: historyItems, index: -1 };
 }
@@ -1589,7 +2782,7 @@ function previewPositionLabel(record = selectedRecord) {
   let priorPagesAreCached = true;
   let cachedBefore = 0;
   for (let page = 1; page < location.page; page += 1) {
-    const data = historyCache.get(page);
+    const data = cachedHistoryPage(page);
     if (!data || !Array.isArray(data.items)) {
       priorPagesAreCached = false;
       break;
@@ -1628,9 +2821,11 @@ function preloadPreviewNeighbors() {
 }
 
 async function loadHistoryPageForPreview(page) {
-  const cached = historyCache.get(page);
+  const cached = cachedHistoryPage(page);
   if (cached) return cached;
-  const data = await request(`/api/history?page=${page}&limit=24`);
+  const data = await request(
+    `/api/history?page=${page}&limit=24&collection_id=${activeCollectionId}`,
+  );
   cacheHistoryPage(data);
   return data;
 }
@@ -1957,6 +3152,7 @@ function finishImagePreviewClose(restoreFocus = true) {
   ui.detailImage.setAttribute("aria-expanded", "false");
   if (ui.imagePreviewDialog.open) ui.imagePreviewDialog.close();
   if (restoreFocus && ui.detailDialog.open) ui.detailImage.focus({ preventScroll: true });
+  updateDetailNavigation();
 }
 
 function closeImagePreview({ immediate = false, restoreFocus = true } = {}) {
@@ -3820,7 +5016,11 @@ async function loadStylePresets() {
   try {
     const data = await request("/api/style-presets");
     stylePresets = data.items || [];
+    // 后端已按 updated_at 倒序返回,这里再稳定排序一次,保证“全部”视图始终时间倒序。
+    stylePresets.sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")));
+    presetAllTotal = stylePresets.length;
     renderStylePresets();
+    renderPresetCollections();
   } catch (error) {
     toast(error.message);
   }
@@ -3830,15 +5030,249 @@ function setPresetFeedback(message = "", type = "error") {
   ui.presetError.hidden = !message;
   ui.presetError.dataset.type = type;
 }
+
+// ---------- 预设库二级筛选胶囊栏 ----------
+function presetCollectionIds(item) {
+  return Array.isArray(item?.collection_ids) ? item.collection_ids.map(Number) : [];
+}
+
+function presetIsFavorite(item) {
+  return presetCollectionIds(item).includes(DEFAULT_COLLECTION_ID);
+}
+
+// 当前筛选视图下的预设集合(不改变 stylePresets 的原始时间倒序)。
+function visibleStylePresets() {
+  const target = Number(currentPresetCollectionId) || 0;
+  if (target <= 0) return stylePresets;
+  return stylePresets.filter((item) => presetCollectionIds(item).includes(target));
+}
+
+// 各分类计数:优先使用后端统计,缺失时按内存数据即时统计,保证徽标与卡片归属严格同步。
+function presetCollectionCount(collectionId) {
+  const target = Number(collectionId) || 0;
+  if (target === 0) return Math.max(0, Number(presetAllTotal) || stylePresets.length);
+  const cached = presetCollections.find((item) => Number(item.id) === target);
+  if (cached && Number.isFinite(Number(cached.count))) return Math.max(0, Number(cached.count));
+  return stylePresets.filter((item) => presetCollectionIds(item).includes(target)).length;
+}
+
+// 就地刷新胶囊徽标,不重建 DOM,避免点击星标时胶囊栏闪烁。
+function paintPresetCollectionBadge(collectionId, count) {
+  if (!ui.presetCollectionsBar) return;
+  const pill = ui.presetCollectionsBar.querySelector(
+    `.collection-pill[data-collection-id="${Number(collectionId)}"] .pill-badge`,
+  );
+  if (pill) pill.textContent = String(Math.max(0, Number(count) || 0));
+}
+
+function adjustPresetCollectionCount(collectionId, delta) {
+  const target = Number(collectionId);
+  if (!Number.isFinite(target) || !delta) return;
+  const cached = presetCollections.find((item) => Number(item.id) === target);
+  if (cached) cached.count = Math.max(0, Number(cached.count || 0) + delta);
+  paintPresetCollectionBadge(target, presetCollectionCount(target));
+}
+
+function createPresetCollectionPill({ id, icon, name, count, active, deletable }) {
+  const pill = document.createElement("button");
+  pill.type = "button";
+  pill.className = "collection-pill";
+  if (Number(id) === 0) pill.classList.add("pill-all");
+  pill.dataset.collectionId = String(id);
+  pill.setAttribute("aria-pressed", active ? "true" : "false");
+  if (active) pill.classList.add("active");
+  const iconSpan = document.createElement("span");
+  iconSpan.className = "collection-pill-icon";
+  iconSpan.setAttribute("aria-hidden", "true");
+  iconSpan.textContent = icon;
+  const nameSpan = document.createElement("span");
+  nameSpan.className = "collection-pill-name";
+  nameSpan.textContent = name;
+  const badge = document.createElement("span");
+  badge.className = "pill-badge";
+  badge.textContent = String(count);
+  pill.append(iconSpan, nameSpan, badge);
+  pill.addEventListener("click", () => selectPresetCollection(id));
+  if (deletable) {
+    const menu = document.createElement("button");
+    menu.type = "button";
+    menu.className = "collection-pill-menu";
+    menu.title = `删除分类“${name}”`;
+    menu.setAttribute("aria-label", `删除分类 ${name}`);
+    menu.textContent = "···";
+    menu.addEventListener("click", (event) => {
+      event.stopPropagation();
+      event.preventDefault();
+      deletePresetCollection(id, name);
+    });
+    pill.append(menu);
+  }
+  return pill;
+}
+
+function renderPresetCollections() {
+  if (!ui.presetCollectionsBar) return;
+  const pills = [
+    createPresetCollectionPill({
+      id: 0,
+      icon: "▦",
+      name: "全部",
+      count: presetCollectionCount(0),
+      active: Number(currentPresetCollectionId) === 0,
+      deletable: false,
+    }),
+  ];
+  const ordered = [...presetCollections].sort((a, b) => {
+    const defaultDelta = Number(Boolean(b.is_default)) - Number(Boolean(a.is_default));
+    if (defaultDelta) return defaultDelta;
+    return Number(a.id) - Number(b.id);
+  });
+  for (const collection of ordered) {
+    const id = Number(collection.id);
+    pills.push(
+      createPresetCollectionPill({
+        id,
+        icon: collection.is_default ? "★" : "📁",
+        name: String(collection.name || "未命名"),
+        count: presetCollectionCount(id),
+        active: Number(currentPresetCollectionId) === id,
+        deletable: !collection.is_default,
+      }),
+    );
+  }
+  // 新建入口已改为右侧常驻静态按钮(#btnPresetAddCollection),不再随胶囊列表滚动。
+  ui.presetCollectionsBar.replaceChildren(...pills);
+  syncCollectionsOverflow(ui.presetCollectionsBar);
+}
+
+async function loadPresetCollections() {
+  const requestId = ++presetCollectionsRequest;
+  try {
+    const payload = await request("/api/style-presets/collections");
+    if (requestId !== presetCollectionsRequest) return;
+    presetCollections = Array.isArray(payload?.collections) ? payload.collections : [];
+    const allTotal = Number(payload?.all_total);
+    if (Number.isFinite(allTotal)) presetAllTotal = Math.max(0, allTotal);
+    // 当前激活分类若已被删除,自动回落到“全部”。
+    if (
+      Number(currentPresetCollectionId) !== 0 &&
+      !presetCollections.some((item) => Number(item.id) === Number(currentPresetCollectionId))
+    ) {
+      currentPresetCollectionId = 0;
+    }
+    renderPresetCollections();
+    renderStylePresets();
+  } catch (error) {
+    if (requestId !== presetCollectionsRequest) return;
+    toast(error.message);
+  }
+}
+
+function selectPresetCollection(collectionId) {
+  const target = Number(collectionId) || 0;
+  if (target === Number(currentPresetCollectionId)) return;
+  currentPresetCollectionId = target;
+  presetPage = 1;
+  renderPresetCollections();
+  renderStylePresets();
+}
+
+async function createPresetCollection() {
+  const name = window.prompt("新建分类名称（最多 100 个字符）", "");
+  if (name === null) return;
+  const cleaned = name.trim();
+  if (!cleaned) {
+    toast("分类名称不能为空");
+    return;
+  }
+  try {
+    const created = await request("/api/style-presets/collections", {
+      method: "POST",
+      body: JSON.stringify({ name: cleaned }),
+    });
+    await loadPresetCollections();
+    // 创建成功后自动切换到新分类视图。
+    currentPresetCollectionId = Number(created?.id) || 0;
+    presetPage = 1;
+    renderPresetCollections();
+    scrollCollectionsToEnd(ui.presetCollectionsBar);
+    renderStylePresets();
+    toast(`已创建分类“${cleaned}”`);
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+async function deletePresetCollection(collectionId, name) {
+  const target = Number(collectionId);
+  if (!Number.isFinite(target) || target <= 0) return;
+  if (!window.confirm(`确定删除分类“${name}”吗？预设本身不会被删除。`)) return;
+  try {
+    await request(`/api/style-presets/collections/${target}`, { method: "DELETE" });
+    // 本地同步解绑,避免等待全量刷新期间徽标与卡片归属不一致。
+    for (const item of stylePresets) {
+      const ids = presetCollectionIds(item);
+      if (ids.includes(target)) {
+        item.collection_ids = ids.filter((value) => value !== target);
+        item.favorite = item.collection_ids.includes(DEFAULT_COLLECTION_ID);
+      }
+    }
+    if (Number(currentPresetCollectionId) === target) currentPresetCollectionId = 0;
+    await loadPresetCollections();
+    toast(`已删除分类“${name}”`);
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+// ---------- 预设星标:乐观更新 + 弹跳微动效(对齐作品库 toggleDefaultFavorite) ----------
+function paintPresetFavoriteStar(star, favorite) {
+  star.dataset.favorite = favorite ? "true" : "false";
+  star.setAttribute("aria-pressed", favorite ? "true" : "false");
+  star.title = favorite ? "取消收藏" : "收藏";
+}
+
+async function togglePresetDefaultFavorite(item, star) {
+  const previous = presetIsFavorite(item);
+  const optimistic = !previous;
+  // 乐观更新:先点亮/熄灭并播放微弹跳,卡片保持原地不动。
+  paintPresetFavoriteStar(star, optimistic);
+  star.classList.remove("is-popping");
+  void star.offsetWidth;
+  star.classList.add("is-popping");
+  if (optimistic !== previous) adjustPresetCollectionCount(DEFAULT_COLLECTION_ID, optimistic ? 1 : -1);
+  try {
+    const result = await request(
+      `/api/style-presets/${encodeURIComponent(item.id)}/toggle-default-favorite`,
+      { method: "POST" },
+    );
+    const favorite = Boolean(result?.is_favorite);
+    const ids = Array.isArray(result?.collection_ids) ? result.collection_ids.map(Number) : [];
+    paintPresetFavoriteStar(star, favorite);
+    item.favorite = favorite;
+    item.collection_ids = ids;
+    // 以服务端结果为准校正徽标(乐观增量与真实结果不一致时回补差值)。
+    if (favorite !== optimistic) {
+      adjustPresetCollectionCount(DEFAULT_COLLECTION_ID, favorite ? 1 : -1);
+    }
+  } catch (error) {
+    // 失败回滚:恢复星标与徽标,并提示原因。
+    paintPresetFavoriteStar(star, previous);
+    if (optimistic !== previous) adjustPresetCollectionCount(DEFAULT_COLLECTION_ID, previous ? 1 : -1);
+    toast(error.message);
+  }
+}
+
 function renderStylePresets() {
-  const total = stylePresets.length;
+  const items = visibleStylePresets();
+  const total = items.length;
   const totalPages = Math.max(1, Math.ceil(total / PRESET_PAGE_SIZE));
-  // 防止删除等操作后当前页溢出。
+  // 防止删除/切换分类后当前页溢出。
   if (presetPage > totalPages) presetPage = totalPages;
   if (presetPage < 1) presetPage = 1;
 
   ui.presetSummary.textContent = `${total} 个预设`;
-  ui.presetsCount.textContent = String(total);
+  ui.presetsCount.textContent = String(Math.max(0, Number(presetAllTotal) || stylePresets.length));
   ui.presetEmpty.hidden = total > 0;
 
   // 更新分页栏显示与按钮可用状态。
@@ -3848,7 +5282,7 @@ function renderStylePresets() {
 
   // 取当前页切片数据。
   const startIndex = (presetPage - 1) * PRESET_PAGE_SIZE;
-  const pageItems = stylePresets.slice(startIndex, startIndex + PRESET_PAGE_SIZE);
+  const pageItems = items.slice(startIndex, startIndex + PRESET_PAGE_SIZE);
 
   ui.presetGrid.replaceChildren(
     ...pageItems.map((item) => {
@@ -3859,30 +5293,364 @@ function renderStylePresets() {
       const thumbMarkup = item.thumbnail_url
         ? `<img class="preset-thumb" src="${escapeHtml(thumbUrl)}" alt="${escapeHtml(item.name)}" loading="lazy">`
         : `<span class="preset-thumb-placeholder" aria-hidden="true">★</span>`;
+      const favorite = presetIsFavorite(item);
       card.innerHTML = `
+        <button type="button" class="batch-check" role="checkbox" aria-checked="false" aria-label="选择预设 ${escapeHtml(item.name)}" tabindex="-1"></button>
         <div class="preset-thumb-wrapper">
           ${thumbMarkup}
           <div class="preset-hover-overlay">
             <button class="action-btn btn-load" type="button" title="一键载入">⚡ 载入</button>
             <button class="action-btn btn-overwrite" type="button" title="用当前设置覆盖">⟳ 覆盖</button>
             <button class="action-btn btn-rename" type="button" title="重命名">✎ 改名</button>
+            <button class="action-btn btn-collection" type="button" title="归类到收藏夹">📁 归类</button>
             <button class="action-btn btn-delete" type="button" title="删除">🗑 删除</button>
           </div>
         </div>
         <div class="preset-info">
           <span class="preset-name" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</span>
-          <span class="preset-favorite-icon" data-favorite="${item.favorite ? "true" : "false"}" title="${item.favorite ? "取消收藏" : "收藏"}">★</span>
+          <button class="preset-favorite-icon" type="button" data-favorite="${favorite ? "true" : "false"}" aria-pressed="${favorite ? "true" : "false"}" title="${favorite ? "取消收藏" : "收藏"}" aria-label="${favorite ? "取消收藏" : "收藏"}">★</button>
         </div>`;
       card.querySelector(".btn-load").addEventListener("click", () => loadStylePreset(item));
       card.querySelector(".btn-overwrite").addEventListener("click", () => openPresetOverwriteDialog(item));
       card.querySelector(".btn-rename").addEventListener("click", () => openPresetRenameDialog(item));
+      card.querySelector(".btn-collection").addEventListener("click", () => openPresetCollectionsDialog(item));
       card.querySelector(".btn-delete").addEventListener("click", () => openPresetDeleteDialog(item));
-      card.querySelector(".preset-favorite-icon").addEventListener("click", () =>
-        updateStylePreset(item, { favorite: !item.favorite }),
-      );
+      card.querySelector(".preset-favorite-icon").addEventListener("click", (event) => {
+        event.stopPropagation();
+        togglePresetDefaultFavorite(item, event.currentTarget);
+      });
+      // 批量模式下点击卡片任意位置 = 切换勾选,绝不触发载入/弹窗等常规操作。
+      card.addEventListener("click", (event) => {
+        if (!isPresetBatchMode) return;
+        event.preventDefault();
+        event.stopPropagation();
+        togglePresetBatchSelection(item.id, { shiftKey: event.shiftKey });
+      });
+      // 复选框是独立控件:阻止冒泡,避免与卡片点击重复触发。
+      card.querySelector(".batch-check").addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        togglePresetBatchSelection(item.id, { shiftKey: event.shiftKey });
+      });
       return card;
     }),
   );
+  // 翻页/重绘后重新同步批量视觉状态:选择集合跨页保留,但只高亮当前页可见项。
+  ui.presetGrid.classList.toggle("is-batch-mode", isPresetBatchMode);
+  if (isPresetBatchMode) paintPresetBatchSelection();
+}
+
+// ---------- 预设库批量管理:选择逻辑 ----------
+function presetBatchCardElements() {
+  if (!ui.presetGrid) return [];
+  return [...ui.presetGrid.querySelectorAll(".preset-card")];
+}
+
+// 当前页可见预设 ID 顺序(与 DOM 顺序一致,保证 Shift 区间语义正确)。
+function presetBatchPageIds() {
+  return presetBatchCardElements()
+    .map((element) => String(element.dataset.presetId || ""))
+    .filter((value) => value);
+}
+
+function paintPresetBatchCard(card, presetId) {
+  if (!card) return;
+  const selected = selectedPresetBatchIds.has(String(presetId));
+  card.classList.toggle("is-selected", selected);
+  const check = card.querySelector(".batch-check");
+  if (check) {
+    check.setAttribute("aria-checked", selected ? "true" : "false");
+    check.title = selected ? "取消选择" : "选择此预设";
+  }
+}
+
+// 就地刷新当前页卡片的选中态,不重建 DOM(避免缩略图重新加载)。
+function paintPresetBatchSelection() {
+  for (const card of presetBatchCardElements()) {
+    paintPresetBatchCard(card, card.dataset.presetId);
+  }
+  updatePresetBatchActionBar();
+}
+
+// 底部操作条在预设库模式下复用:计数、全选文案与按钮可用性均按预设集合计算。
+function updatePresetBatchActionBar() {
+  const count = selectedPresetBatchIds.size;
+  if (ui.batchSelectedCount) ui.batchSelectedCount.textContent = String(count);
+  const pageIds = presetBatchPageIds();
+  const allSelected =
+    pageIds.length > 0 && pageIds.every((id) => selectedPresetBatchIds.has(id));
+  if (ui.batchSelectAll) {
+    ui.batchSelectAll.textContent = allSelected ? "取消全选" : "全选本页";
+    ui.batchSelectAll.disabled = pageIds.length === 0;
+    ui.batchSelectAll.setAttribute("aria-pressed", allSelected ? "true" : "false");
+  }
+  const empty = count === 0;
+  for (const button of [ui.batchFavorite, ui.batchDelete]) {
+    if (button) button.disabled = empty || presetBatchBusy;
+  }
+  if (ui.batchClearSelection) ui.batchClearSelection.disabled = empty || presetBatchBusy;
+  if (ui.batchExit) ui.batchExit.disabled = presetBatchBusy;
+  if (ui.batchActionBar) ui.batchActionBar.classList.toggle("is-busy", presetBatchBusy);
+}
+
+function setPresetBatchMode(enabled) {
+  const next = Boolean(enabled);
+  if (next === isPresetBatchMode) return;
+  isPresetBatchMode = next;
+  document.body.classList.toggle("is-batch-mode", isPresetBatchMode);
+  // 生图控制台与批量操作条互斥:与作品库批量模式共用同一收起类名。
+  const deck = ui.commandDeck || document.querySelector(".command-deck");
+  if (deck) {
+    deck.classList.toggle("is-batch-hidden", isPresetBatchMode);
+    deck.setAttribute("aria-hidden", String(isPresetBatchMode));
+  }
+  if (ui.presetGrid) ui.presetGrid.classList.toggle("is-batch-mode", isPresetBatchMode);
+  if (ui.btnTogglePresetBatchMode) {
+    ui.btnTogglePresetBatchMode.setAttribute("aria-pressed", String(isPresetBatchMode));
+    ui.btnTogglePresetBatchMode.title = isPresetBatchMode ? "退出批量管理" : "批量管理预设";
+    const label = ui.btnTogglePresetBatchMode.querySelector("span");
+    if (label) label.textContent = isPresetBatchMode ? "退出批量" : "批量管理";
+  }
+  if (isPresetBatchMode) {
+    // 复用底部操作条,但预设库没有导出能力,必须隐藏导出按钮。
+    if (ui.batchExport) ui.batchExport.hidden = true;
+    showBatchActionBar();
+    paintPresetBatchSelection();
+  } else {
+    selectedPresetBatchIds.clear();
+    lastPresetBatchAnchorId = null;
+    // 批量弹窗若仍打开,一并复位关闭,避免上下文悬挂。
+    if (presetBatchCollectionsContext && ui.presetCollectionsDialog?.open) {
+      closePresetBatchCollectionsDialog();
+    }
+    if (presetBatchDeleteContext && ui.presetDeleteDialog?.open) {
+      closePresetBatchDeleteDialog();
+    }
+    paintPresetBatchSelection();
+    hideBatchActionBar();
+    if (ui.batchExport) ui.batchExport.hidden = false;
+  }
+}
+
+function togglePresetBatchSelection(presetId, { shiftKey = false } = {}) {
+  const target = String(presetId || "");
+  if (!target) return;
+  if (!isPresetBatchMode) setPresetBatchMode(true);
+
+  if (shiftKey && lastPresetBatchAnchorId !== null) {
+    const pageIds = presetBatchPageIds();
+    const from = pageIds.indexOf(lastPresetBatchAnchorId);
+    const to = pageIds.indexOf(target);
+    if (from >= 0 && to >= 0) {
+      // 区间连选:以目标项当前状态为准,整段统一为“选中”或“取消”。
+      const shouldSelect = !selectedPresetBatchIds.has(target);
+      const [start, end] = from <= to ? [from, to] : [to, from];
+      for (let index = start; index <= end; index += 1) {
+        if (shouldSelect) selectedPresetBatchIds.add(pageIds[index]);
+        else selectedPresetBatchIds.delete(pageIds[index]);
+      }
+      lastPresetBatchAnchorId = target;
+      paintPresetBatchSelection();
+      return;
+    }
+  }
+
+  if (selectedPresetBatchIds.has(target)) selectedPresetBatchIds.delete(target);
+  else selectedPresetBatchIds.add(target);
+  lastPresetBatchAnchorId = target;
+  paintPresetBatchSelection();
+}
+
+function selectAllPresetBatchPage() {
+  const pageIds = presetBatchPageIds();
+  if (!pageIds.length) return;
+  const allSelected = pageIds.every((id) => selectedPresetBatchIds.has(id));
+  for (const id of pageIds) {
+    if (allSelected) selectedPresetBatchIds.delete(id);
+    else selectedPresetBatchIds.add(id);
+  }
+  lastPresetBatchAnchorId = allSelected ? null : pageIds[pageIds.length - 1];
+  paintPresetBatchSelection();
+}
+
+function clearPresetBatchSelection() {
+  selectedPresetBatchIds.clear();
+  lastPresetBatchAnchorId = null;
+  paintPresetBatchSelection();
+}
+
+// 批量请求统一入口:锁定操作条、串行执行、结束后刷新选择态。
+async function runPresetBatchTask(task, { onError } = {}) {
+  if (presetBatchBusy) return;
+  presetBatchBusy = true;
+  updatePresetBatchActionBar();
+  try {
+    await task();
+  } catch (error) {
+    const message = error?.message || "批量操作失败";
+    if (typeof onError === "function") onError(message);
+    else toast(message);
+  } finally {
+    presetBatchBusy = false;
+    updatePresetBatchActionBar();
+  }
+}
+
+// ---------- 预设批量归类:复用 #presetCollectionsDialog ----------
+function presetBatchSelectedItems() {
+  return stylePresets.filter((item) => selectedPresetBatchIds.has(String(item.id)));
+}
+
+function openPresetBatchCollectionsDialog() {
+  const items = presetBatchSelectedItems();
+  if (!items.length) {
+    toast("请先选择要归类的预设");
+    return;
+  }
+  presetBatchCollectionsContext = { ids: items.map((item) => String(item.id)) };
+  setPresetCollectionsError("");
+  // 交集语义:仅当所有选中预设都已归属某分类时才默认勾选,避免误覆盖。
+  const intersection = items.reduce((acc, item) => {
+    const ids = new Set(presetCollectionIds(item));
+    return acc === null ? ids : new Set([...acc].filter((id) => ids.has(id)));
+  }, null);
+  if (ui.presetCollectionsSummary) {
+    ui.presetCollectionsSummary.textContent = `已选 ${items.length} 个预设，勾选要归入的分类（保存后将覆盖这些预设的分类归属）：`;
+  }
+  const title = ui.presetCollectionsDialog?.querySelector(".dialog-heading h2");
+  if (title) title.textContent = "批量归类预设";
+  renderPresetCollectionsChecklist([...(intersection || [])]);
+  ui.presetCollectionsDialog.showModal();
+}
+
+function closePresetBatchCollectionsDialog() {
+  presetBatchCollectionsContext = null;
+  if (ui.presetCollectionsSummary) {
+    ui.presetCollectionsSummary.textContent = "";
+  }
+  const title = ui.presetCollectionsDialog?.querySelector(".dialog-heading h2");
+  if (title) title.textContent = "归类预设";
+  ui.presetCollectionsDialog?.close();
+}
+
+async function submitPresetBatchCollections() {
+  const context = presetBatchCollectionsContext;
+  if (!context || presetCollectionsSaving) return;
+  const collectionIds = checkedPresetCollectionIds();
+  // 全部取消勾选时改用 remove 清空所有分类,语义等价于“移出全部收藏夹”。
+  const clearing = collectionIds.length === 0;
+  presetCollectionsSaving = true;
+  const submitButton = ui.presetCollectionsForm?.querySelector('button[type="submit"]');
+  if (submitButton) submitButton.disabled = true;
+  setPresetCollectionsError("");
+  try {
+    const result = await request("/api/style-presets/batch-collections", {
+      method: "POST",
+      body: JSON.stringify({
+        preset_ids: context.ids,
+        collection_ids: clearing
+          ? presetCollections.map((item) => Number(item.id)).filter((id) => id > 0)
+          : collectionIds,
+        mode: clearing ? "remove" : "set",
+      }),
+    });
+    const updated = new Set(
+      (Array.isArray(result?.updated) ? result.updated : context.ids).map(String),
+    );
+    // 本地内存同步:set 模式整体覆盖,remove 模式逐个剔除。
+    for (const item of stylePresets) {
+      if (!updated.has(String(item.id))) continue;
+      const current = presetCollectionIds(item);
+      const next = clearing
+        ? current.filter((id) => !collectionIds.includes(id) && !presetCollections.some((c) => Number(c.id) === id))
+        : [...collectionIds];
+      item.collection_ids = [...new Set(next)].sort((a, b) => a - b);
+      item.favorite = item.collection_ids.includes(DEFAULT_COLLECTION_ID);
+    }
+    closePresetBatchCollectionsDialog();
+    // 归类会改变各分类归属,重新拉取统计以保证徽标与卡片严格同步。
+    await loadPresetCollections();
+    paintPresetBatchSelection();
+    toast(
+      clearing
+        ? `已将 ${updated.size} 个预设移出全部分类`
+        : `已更新 ${updated.size} 个预设的分类归属`,
+    );
+  } catch (error) {
+    setPresetCollectionsError(error.message || "批量归类失败");
+  } finally {
+    presetCollectionsSaving = false;
+    if (submitButton) submitButton.disabled = false;
+  }
+}
+
+// ---------- 预设批量删除:复用 #presetDeleteDialog ----------
+function openPresetBatchDeleteDialog() {
+  const ids = [...selectedPresetBatchIds];
+  if (!ids.length) {
+    toast("请先选择要删除的预设");
+    return;
+  }
+  presetBatchDeleteContext = { ids };
+  if (ui.presetDeleteSummary) {
+    ui.presetDeleteSummary.textContent = `已选 ${ids.length} 项预设，删除后将同步移除磁盘封面缩略图，此操作无法撤销。`;
+  }
+  const title = ui.presetDeleteDialog?.querySelector(".dialog-heading h2");
+  if (title) title.textContent = `批量删除 ${ids.length} 项预设`;
+  setPresetDialogError(ui.presetDeleteError);
+  if (ui.confirmPresetDelete) {
+    ui.confirmPresetDelete.disabled = false;
+    ui.confirmPresetDelete.textContent = "确认删除";
+  }
+  ui.presetDeleteDialog.showModal();
+}
+
+function closePresetBatchDeleteDialog() {
+  presetBatchDeleteContext = null;
+  if (ui.presetDeleteSummary) ui.presetDeleteSummary.textContent = "";
+  const title = ui.presetDeleteDialog?.querySelector(".dialog-heading h2");
+  if (title) title.textContent = "删除预设";
+  ui.presetDeleteDialog?.close();
+}
+
+async function submitPresetBatchDelete() {
+  const context = presetBatchDeleteContext;
+  if (!context || ui.confirmPresetDelete?.disabled) return;
+  const ids = [...context.ids];
+  if (ui.confirmPresetDelete) {
+    ui.confirmPresetDelete.disabled = true;
+    ui.confirmPresetDelete.textContent = "正在删除...";
+  }
+  setPresetDialogError(ui.presetDeleteError);
+  await runPresetBatchTask(
+    async () => {
+      const result = await request("/api/style-presets/batch-delete", {
+        method: "POST",
+        body: JSON.stringify({ preset_ids: ids }),
+      });
+      const deleted = Number(result?.deleted ?? ids.length);
+      const removed = new Set(ids.map(String));
+      for (const id of removed) selectedPresetBatchIds.delete(id);
+      lastPresetBatchAnchorId = null;
+      stylePresets = stylePresets.filter((preset) => !removed.has(String(preset.id)));
+      presetAllTotal = stylePresets.length;
+      closePresetBatchDeleteDialog();
+      // 删除后当前页可能已空:renderStylePresets 内部会自动回退页码。
+      await loadPresetCollections();
+      renderStylePresets();
+      paintPresetBatchSelection();
+      toast(`已删除 ${deleted} 个预设`);
+    },
+    {
+      onError: (message) => {
+        setPresetDialogError(ui.presetDeleteError, message);
+      },
+    },
+  );
+  if (ui.confirmPresetDelete) {
+    ui.confirmPresetDelete.disabled = false;
+    ui.confirmPresetDelete.textContent = "确认删除";
+  }
 }
 
 // ---------- 一键载入:全量恢复工作台状态 ----------
@@ -3973,10 +5741,107 @@ async function submitPresetRename() {
   }
 }
 
+// ---------- 预设归类:多选收藏夹弹窗 ----------
+function setPresetCollectionsError(message = "") {
+  if (!ui.presetCollectionsError) return;
+  ui.presetCollectionsError.textContent = message;
+  ui.presetCollectionsError.hidden = !message;
+}
+
+function renderPresetCollectionsChecklist(checkedIds = []) {
+  if (!ui.presetCollectionsChecklist) return;
+  const checked = new Set(checkedIds.map(Number));
+  const ordered = [...presetCollections].sort((a, b) => {
+    const defaultDelta = Number(Boolean(b.is_default)) - Number(Boolean(a.is_default));
+    if (defaultDelta) return defaultDelta;
+    return Number(a.id) - Number(b.id);
+  });
+  const rows = ordered.map((collection) => {
+    const id = Number(collection.id);
+    const label = document.createElement("label");
+    label.className = "favorite-group-check";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.value = String(id);
+    input.checked = checked.has(id);
+    const text = document.createElement("span");
+    text.textContent = `${collection.is_default ? "★ " : ""}${collection.name || "未命名"}`;
+    const count = document.createElement("small");
+    count.textContent = `${presetCollectionCount(id)} 个`;
+    count.style.marginLeft = "auto";
+    count.style.color = "var(--text-tertiary)";
+    label.append(input, text, count);
+    return label;
+  });
+  if (!rows.length) {
+    const empty = document.createElement("p");
+    empty.className = "import-hint";
+    empty.textContent = "暂无可用分类，请先在胶囊栏点击“＋”新建。";
+    rows.push(empty);
+  }
+  ui.presetCollectionsChecklist.replaceChildren(...rows);
+}
+
+function openPresetCollectionsDialog(item) {
+  // 单预设归类前复位批量上下文,避免弹窗沿用批量标题与提交分支。
+  presetBatchCollectionsContext = null;
+  presetCollectionsTarget = item;
+  setPresetCollectionsError("");
+  const title = ui.presetCollectionsDialog?.querySelector(".dialog-heading h2");
+  if (title) title.textContent = "归类预设";
+  if (ui.presetCollectionsSummary) {
+    ui.presetCollectionsSummary.textContent = `勾选预设【${item.name}】要归入的分类，可同时归入多个分类：`;
+  }
+  renderPresetCollectionsChecklist(presetCollectionIds(item));
+  ui.presetCollectionsDialog.showModal();
+}
+
+function checkedPresetCollectionIds() {
+  if (!ui.presetCollectionsChecklist) return [];
+  return [...ui.presetCollectionsChecklist.querySelectorAll('input[type="checkbox"]:checked')]
+    .map((input) => Number(input.value))
+    .filter((value) => Number.isFinite(value) && value > 0);
+}
+
+async function submitPresetCollections() {
+  const item = presetCollectionsTarget;
+  if (!item || presetCollectionsSaving) return;
+  const collectionIds = checkedPresetCollectionIds();
+  presetCollectionsSaving = true;
+  const submitButton = ui.presetCollectionsForm?.querySelector('button[type="submit"]');
+  if (submitButton) submitButton.disabled = true;
+  setPresetCollectionsError("");
+  try {
+    const result = await request(`/api/style-presets/${encodeURIComponent(item.id)}/collections`, {
+      method: "POST",
+      body: JSON.stringify({ collection_ids: collectionIds }),
+    });
+    const updated = Array.isArray(result?.collection_ids)
+      ? result.collection_ids.map(Number)
+      : collectionIds;
+    item.collection_ids = updated;
+    item.favorite = updated.includes(DEFAULT_COLLECTION_ID);
+    ui.presetCollectionsDialog.close();
+    presetCollectionsTarget = null;
+    // 归类会改变各分类归属,重新拉取统计以保证徽标与卡片严格同步。
+    await loadPresetCollections();
+    toast("已更新预设归类");
+  } catch (error) {
+    setPresetCollectionsError(error.message);
+  } finally {
+    presetCollectionsSaving = false;
+    if (submitButton) submitButton.disabled = false;
+  }
+}
+
 // ---------- 删除预设:二次确认 + 淡出移除 ----------
 let presetDeleteTarget = null;
 function openPresetDeleteDialog(item) {
+  // 单预设删除前复位批量上下文,避免弹窗沿用批量标题与提交分支。
+  presetBatchDeleteContext = null;
   presetDeleteTarget = item;
+  const title = ui.presetDeleteDialog?.querySelector(".dialog-heading h2");
+  if (title) title.textContent = "删除预设";
   ui.presetDeleteSummary.textContent = `确定删除预设【${item.name}】吗？此操作无法撤销。`;
   setPresetDialogError(ui.presetDeleteError);
   ui.presetDeleteDialog.showModal();
@@ -3989,6 +5854,9 @@ async function submitPresetDelete() {
     ui.presetDeleteDialog.close();
     presetDeleteTarget = null;
     stylePresets = stylePresets.filter((preset) => preset.id !== item.id);
+    presetAllTotal = stylePresets.length;
+    // 删除后同步各分类徽标,避免计数与实际归属脱节。
+    renderPresetCollections();
     const card = ui.presetGrid.querySelector(`.preset-card[data-preset-id="${CSS.escape(item.id)}"]`);
     if (card) {
       card.classList.add("is-removing");
@@ -4160,11 +6028,13 @@ async function submitPresetCreate() {
     }
     ui.presetCreateDialog.close();
     resetPresetCreateCover();
-    // 新增预设排在列表首位(收藏区之后)。
-    const firstRegular = stylePresets.findIndex((item) => !item.favorite);
-    stylePresets.splice(firstRegular < 0 ? stylePresets.length : firstRegular, 0, created);
-    // 回到第一页,确保用户能直接看到刚创建的预设。
+    // 新预设始终按时间顺序追加到数组首位,不再寻找非收藏项插入。
+    stylePresets.unshift(created);
+    presetAllTotal = stylePresets.length;
+    // 回到第一页并切回“全部”视图,确保用户能直接看到刚创建的预设。
+    currentPresetCollectionId = 0;
     presetPage = 1;
+    renderPresetCollections();
     renderStylePresets();
     toast(`已新建预设：【${created.name}】`);
   } catch (error) {
@@ -4175,6 +6045,12 @@ async function submitPresetCreate() {
 }
 function switchMainTab(tab) {
   const showPresets = tab === "presets";
+  // Tab 互斥:切换视图时退出两种批量模式,防止悬浮条与选择集合串味。
+  if (showPresets) {
+    if (isBatchMode) setBatchMode(false);
+  } else if (isPresetBatchMode) {
+    setPresetBatchMode(false);
+  }
   ui.tabBtnGallery.classList.toggle("active", !showPresets);
   ui.tabBtnPresets.classList.toggle("active", showPresets);
   ui.tabBtnGallery.setAttribute("aria-selected", String(!showPresets));
@@ -4548,6 +6424,56 @@ for (const input of [ui.variantCount, ui.variantDrawerCount])
   });
 ui.prevPage.addEventListener("click", () => loadHistory(historyPage - 1));
 ui.nextPage.addEventListener("click", () => loadHistory(historyPage + 1));
+// ---------- 批量管理事件绑定 ----------
+// 底部操作条为作品库与预设库共用:按当前活动 Tab 分发到各自的状态机。
+function isPresetsTabActive() {
+  return Boolean(ui.presetsViewContainer && !ui.presetsViewContainer.hidden);
+}
+ui.btnToggleBatchMode?.addEventListener("click", () => setBatchMode(!isBatchMode));
+ui.btnTogglePresetBatchMode?.addEventListener("click", () =>
+  setPresetBatchMode(!isPresetBatchMode),
+);
+ui.batchSelectAll?.addEventListener("click", () => {
+  if (isPresetsTabActive()) selectAllPresetBatchPage();
+  else selectAllBatchPage();
+});
+ui.batchClearSelection?.addEventListener("click", () => {
+  if (isPresetsTabActive()) clearPresetBatchSelection();
+  else clearBatchSelection();
+});
+ui.batchExport?.addEventListener("click", () => {
+  // 预设库无导出能力,按钮在批量模式下已隐藏,此处仅作防御。
+  if (isPresetsTabActive()) return;
+  batchExportSelected();
+});
+ui.batchFavorite?.addEventListener("click", () => {
+  if (isPresetsTabActive()) openPresetBatchCollectionsDialog();
+  else openBatchFavoriteDialog();
+});
+ui.batchDelete?.addEventListener("click", () => {
+  if (isPresetsTabActive()) openPresetBatchDeleteDialog();
+  else openBatchDeleteDialog();
+});
+ui.batchExit?.addEventListener("click", () => {
+  if (isPresetsTabActive()) setPresetBatchMode(false);
+  else setBatchMode(false);
+});
+// 批量模式下按 Esc 退出(详情弹窗/预览打开时由各自模块优先处理)。
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  if (!isBatchMode && !isPresetBatchMode) return;
+  if (ui.detailDialog?.open || ui.imagePreviewDialog?.open) return;
+  if (document.querySelector("dialog[open]")) return;
+  if (isPresetBatchMode) setPresetBatchMode(false);
+  else setBatchMode(false);
+});
+// 切换主视图 Tab 时自动退出两种批量模式,避免悬浮条与状态串味。
+ui.tabBtnPresets?.addEventListener("click", () => {
+  if (isBatchMode) setBatchMode(false);
+});
+ui.tabBtnGallery?.addEventListener("click", () => {
+  if (isPresetBatchMode) setPresetBatchMode(false);
+});
 ui.copyPositivePrompt?.addEventListener("click", () => {
   copyPromptToClipboard(ui.detailPositive.value, ui.copyPositivePrompt, "完整提示词已复制到剪贴板");
 });
@@ -4559,6 +6485,38 @@ ui.detailImage.addEventListener("keydown", (event) => {
   if (event.key !== "Enter" && event.key !== " ") return;
   event.preventDefault();
   openImagePreview();
+});
+ui.detailPrevious?.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation(); // 阻止冒泡，避免触发图片的打开全屏预览
+  navigateDetail(-1); // 切到画廊前面一张
+});
+ui.detailNext?.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation(); // 阻止冒泡
+  navigateDetail(1); // 切到画廊后面一张
+});
+ui.detailDialog.addEventListener("keydown", (event) => {
+  // 1. 若全屏大图预览打开中，跳过（方向键由全屏模块接管）
+  if (imagePreview.phase !== "closed") return;
+
+  // 2. 防误触：若用户光标处于输入框、文本域内，不触发切图
+  const activeTag = document.activeElement ? document.activeElement.tagName.toLowerCase() : "";
+  const isInputActive = ["input", "textarea", "select"].includes(activeTag) || event.target.matches("input, textarea, select");
+  if (isInputActive) return;
+
+  if (event.key === "ArrowLeft") {
+    event.preventDefault();
+    navigateDetail(-1);
+  } else if (event.key === "ArrowRight") {
+    event.preventDefault();
+    navigateDetail(1);
+  } else if (event.key === "c" || event.key === "C") {
+    // 键盘挑图流：C 键直接快捷复制当前图片
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    event.preventDefault();
+    executeQuickExport();
+  }
 });
 ui.closeImagePreview.addEventListener("click", () => closeImagePreview());
 ui.imagePreviewPrevious.addEventListener("click", (event) => navigatePreview(-1, event.currentTarget));
@@ -4677,17 +6635,114 @@ ui.openFolder.addEventListener("click", async () => {
     ui.openFolder.disabled = false;
   }
 });
-ui.deleteRecord.addEventListener("click", async () => {
-  if (!selectedRecord || !confirm("只删除 WebUI 历史记录，图片文件会保留。继续吗？")) return;
+// ---------- 导出目录胶囊与快捷复制 ----------
+ui.btnSetExportFolder?.addEventListener("click", triggerPickExportFolder);
+ui.btnOpenExportFolder?.addEventListener("click", async () => {
   try {
-    await request(`/api/history/${selectedRecord.id}`, { method: "DELETE" });
-    closeImagePreview({ immediate: true, restoreFocus: false });
-    ui.detailDialog.close();
-    selectedRecord = null;
-    await loadHistory(historyPage);
+    await request("/api/settings/open-export-folder", { method: "POST" });
   } catch (error) {
     toast(error.message);
   }
+});
+ui.quickExportImage?.addEventListener("click", executeQuickExport);
+// ---------- 删除作品:拟态确认弹窗 + 物理文件同步删除 ----------
+function openRecordDeleteDialog() {
+  if (!selectedRecord) return;
+  // 复用同一弹窗:进入前先复位批量上下文,避免残留批量删除状态。
+  batchDeleteContext = null;
+  const sequence = selectedRecord.sequence ?? "";
+  const filename = selectedRecord.filename || "";
+  ui.recordDeleteSummary.textContent = `作品 #${sequence} · ${filename}`;
+  const warning = ui.recordDeleteDialog?.querySelector(".record-delete-warning");
+  if (warning) {
+    warning.textContent = "⚠️ 确定要删除该作品吗？此操作将同步永久删除本地物理图片文件，不可撤销。";
+  }
+  const title = ui.recordDeleteDialog?.querySelector(".dialog-heading h2");
+  if (title) title.textContent = "删除作品";
+  setRecordDeleteError("");
+  ui.confirmRecordDelete.disabled = false;
+  ui.confirmRecordDelete.textContent = "确认删除";
+  ui.recordDeleteDialog.showModal();
+}
+
+async function submitRecordDelete() {
+  const record = selectedRecord;
+  if (!record || ui.confirmRecordDelete.disabled) return;
+  ui.confirmRecordDelete.disabled = true;
+  ui.confirmRecordDelete.textContent = "正在删除...";
+  ui.recordDeleteError.textContent = "";
+  ui.recordDeleteError.hidden = true;
+  try {
+    await request(`/api/history/${record.id}`, { method: "DELETE" });
+    ui.recordDeleteDialog.close();
+    closeImagePreview({ immediate: true, restoreFocus: false });
+    ui.detailDialog.close();
+    selectedRecord = null;
+    updateDetailNavigation();
+    await loadHistory(historyPage);
+    // 删除后同步刷新胶囊栏计数,避免“全部”与各收藏夹徽标滞后。
+    await loadGalleryCollections();
+    toast("作品及本地物理文件已删除");
+  } catch (error) {
+    ui.recordDeleteError.textContent = error.message;
+    ui.recordDeleteError.hidden = false;
+  } finally {
+    ui.confirmRecordDelete.disabled = false;
+    ui.confirmRecordDelete.textContent = "确认删除";
+  }
+}
+
+ui.deleteRecord.addEventListener("click", openRecordDeleteDialog);
+// 关闭/取消时按当前上下文复位:批量模式需还原弹窗文案与上下文。
+ui.closeRecordDelete.addEventListener("click", () => {
+  if (batchDeleteContext) closeBatchDeleteDialog();
+  else ui.recordDeleteDialog.close();
+});
+ui.cancelRecordDelete.addEventListener("click", () => {
+  if (batchDeleteContext) closeBatchDeleteDialog();
+  else ui.recordDeleteDialog.close();
+});
+ui.recordDeleteForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (batchDeleteContext) submitBatchDelete();
+  else submitRecordDelete();
+});
+// ---------- 详情页“收藏至...”多选弹窗 ----------
+ui.detailManageCollections?.addEventListener("click", openImageCollectionsDialog);
+ui.closeImageCollections?.addEventListener("click", () => {
+  if (batchFavoriteContext) closeBatchFavoriteDialog();
+  else ui.imageCollectionsDialog.close();
+});
+ui.cancelImageCollections?.addEventListener("click", () => {
+  if (batchFavoriteContext) closeBatchFavoriteDialog();
+  else ui.imageCollectionsDialog.close();
+});
+// 复选框勾选变化实时联动批量模式的警告与保存按钮文案/样式。
+ui.imageCollectionsChecklist?.addEventListener("change", () => {
+  if (batchFavoriteContext) updateBatchCollectionsState();
+});
+ui.btnCreateAndCheckCollection?.addEventListener("click", createAndCheckCollection);
+ui.newCollectionNameInput?.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  // 回车不提交整个表单,改为快捷新建并勾选。
+  event.preventDefault();
+  createAndCheckCollection();
+});
+ui.imageCollectionsForm?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (batchFavoriteContext) saveBatchImageCollections();
+  else saveImageCollections();
+});
+ui.imageCollectionsDialog?.addEventListener("click", (event) => {
+  if (event.target !== ui.imageCollectionsDialog) return;
+  if (batchFavoriteContext) closeBatchFavoriteDialog();
+  else ui.imageCollectionsDialog.close();
+});
+// 点击遮罩区域关闭弹窗(内容区点击不触发)。
+ui.recordDeleteDialog.addEventListener("click", (event) => {
+  if (event.target !== ui.recordDeleteDialog) return;
+  if (batchDeleteContext) closeBatchDeleteDialog();
+  else ui.recordDeleteDialog.close();
 });
 ui.closePool.addEventListener("click", closePool);
 ui.confirmPool.addEventListener("click", closePool);
@@ -4800,11 +6855,30 @@ ui.presetPrevPage?.addEventListener("click", () => {
   }
 });
 ui.presetNextPage?.addEventListener("click", () => {
-  const totalPages = Math.max(1, Math.ceil(stylePresets.length / PRESET_PAGE_SIZE));
+  const totalPages = Math.max(1, Math.ceil(visibleStylePresets().length / PRESET_PAGE_SIZE));
   if (presetPage < totalPages) {
     presetPage += 1;
     renderStylePresets();
   }
+});
+ui.presetCollectionsForm?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (presetBatchCollectionsContext) submitPresetBatchCollections();
+  else submitPresetCollections();
+});
+ui.closePresetCollections?.addEventListener("click", () => {
+  if (presetBatchCollectionsContext) closePresetBatchCollectionsDialog();
+  else ui.presetCollectionsDialog.close();
+});
+ui.cancelPresetCollections?.addEventListener("click", () => {
+  if (presetBatchCollectionsContext) closePresetBatchCollectionsDialog();
+  else ui.presetCollectionsDialog.close();
+});
+// 点击遮罩关闭:批量上下文需同步复位,避免下次单预设归类残留批量文案。
+ui.presetCollectionsDialog?.addEventListener("click", (event) => {
+  if (event.target !== ui.presetCollectionsDialog) return;
+  if (presetBatchCollectionsContext) closePresetBatchCollectionsDialog();
+  else ui.presetCollectionsDialog.close();
 });
 ui.presetCreateForm.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -4841,10 +6915,23 @@ ui.closePresetRename.addEventListener("click", () => ui.presetRenameDialog.close
 ui.cancelPresetRename.addEventListener("click", () => ui.presetRenameDialog.close());
 ui.presetDeleteForm.addEventListener("submit", (event) => {
   event.preventDefault();
-  submitPresetDelete();
+  if (presetBatchDeleteContext) submitPresetBatchDelete();
+  else submitPresetDelete();
 });
-ui.closePresetDelete.addEventListener("click", () => ui.presetDeleteDialog.close());
-ui.cancelPresetDelete.addEventListener("click", () => ui.presetDeleteDialog.close());
+ui.closePresetDelete.addEventListener("click", () => {
+  if (presetBatchDeleteContext) closePresetBatchDeleteDialog();
+  else ui.presetDeleteDialog.close();
+});
+ui.cancelPresetDelete.addEventListener("click", () => {
+  if (presetBatchDeleteContext) closePresetBatchDeleteDialog();
+  else ui.presetDeleteDialog.close();
+});
+// 点击遮罩关闭:批量上下文需同步复位,避免下次单预设删除残留批量文案。
+ui.presetDeleteDialog?.addEventListener("click", (event) => {
+  if (event.target !== ui.presetDeleteDialog) return;
+  if (presetBatchDeleteContext) closePresetBatchDeleteDialog();
+  else ui.presetDeleteDialog.close();
+});
 ui.tabBtnGallery.addEventListener("click", () => switchMainTab("gallery"));
 ui.tabBtnPresets.addEventListener("click", () => switchMainTab("presets"));
 ui.manual_artist.addEventListener("input", () => {
@@ -4978,6 +7065,11 @@ document.addEventListener("keydown", (event) => {
 
 async function initialize() {
   applyTheme(initialTheme());
+  // 常驻新建按钮与胶囊栏滚轮桥接:静态绑定一次,不随列表重渲染丢失。
+  ui.btnGalleryAddCollection?.addEventListener("click", createGalleryCollection);
+  ui.btnPresetAddCollection?.addEventListener("click", createPresetCollection);
+  bindCollectionsBar(ui.galleryCollectionsBar);
+  bindCollectionsBar(ui.presetCollectionsBar);
   try {
     const payload = await request("/api/config");
     config = payload;
@@ -5002,10 +7094,13 @@ async function initialize() {
     loadResources(),
     refreshConnection(),
     pollBatch(),
+    loadGalleryCollections(),
     loadHistory(1),
     loadLoraInventory(),
     loadArtistFavorites(),
     loadStylePresets(),
+    loadPresetCollections(),
+    loadExportFolderConfig(),
   ]);
   setInterval(pollBatch, 1200);
   setInterval(refreshConnection, 5000);
