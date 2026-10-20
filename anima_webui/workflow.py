@@ -45,6 +45,52 @@ DETAILER_NODES = {
     "face": {"detector": 10, "editor": 15, "detailer": 29, "detector_input": "bbox_detector"},
     "eyes": {"detector": 11, "editor": 16, "detailer": 30, "detector_input": "bbox_detector"},
 }
+# 部位专属 Detailer 调优参数。
+# 模板 widgets_values 的索引一旦错位,steps/denoise 会读到极小值或越界值,
+# 导致局部重绘退化为平涂色块;此处提供经过验证的推荐值作为兜底。
+DETAILER_CONFIG_OVERRIDES: dict[str, dict[str, Any]] = {
+    "hand": {
+        "steps": 20,
+        "denoise": 0.4,
+        "guide_size": 512,
+        "max_size": 1024,
+        "bbox_crop_factor": 3.0,
+        "feather": 15,
+        "wildcard": "detailed hands, clean fingers",
+    },
+    "eyes": {
+        "steps": 20,
+        "denoise": 0.3,
+        "guide_size": 256,
+        "max_size": 512,
+        "bbox_crop_factor": 2.2,
+        "feather": 10,
+        "wildcard": "detailed eyes, expressive pupils, anime eyes",
+    },
+    "face": {
+        "steps": 20,
+        "denoise": 0.35,
+        "guide_size": 512,
+        "max_size": 1024,
+        "bbox_crop_factor": 2.0,
+        "feather": 10,
+        "wildcard": "",
+    },
+    "nsfw": {
+        "steps": 20,
+        "denoise": 0.4,
+        "guide_size": 512,
+        "max_size": 1024,
+        "bbox_crop_factor": 2.0,
+        "feather": 10,
+        "wildcard": "",
+    },
+}
+# 安全边界:低于该步数无法在遮罩内收敛,高于该去噪强度会破坏原图结构。
+DETAILER_MIN_STEPS = 5
+DETAILER_DENOISE_RANGE = (0.05, 0.95)
+DETAILER_EYES_MAX_GUIDE_SIZE = 256
+DETAILER_HAND_MIN_CROP_FACTOR = 2.8
 MAX_LORAS = 64
 MAX_LORA_MANAGED_TRIGGERS = 256
 MIN_LORA_STRENGTH = -100.0
@@ -790,6 +836,15 @@ def _ui_widgets(ui: dict[str, Any], node_id: int) -> list[Any]:
     return list(_visual_node(ui, node_id).get("widgets_values") or [])
 
 
+def _detailer_widget(detailer_widgets: list[Any], index: int, fallback: Any) -> Any:
+    """按索引读取模板控件值,索引越界或空值时返回兜底值。"""
+    if index < len(detailer_widgets):
+        value = detailer_widgets[index]
+        if value is not None and value != "":
+            return value
+    return fallback
+
+
 def _detailer_nodes(
     ui: dict[str, Any], name: str, image: list[Any]
 ) -> tuple[dict[str, dict[str, Any]], list[Any]]:
@@ -797,56 +852,92 @@ def _detailer_nodes(
     detector_id = config["detector"]
     editor_id = config["editor"]
     detailer_id = config["detailer"]
+    preset = DETAILER_CONFIG_OVERRIDES.get(name, {})
+
     detector_ui = _visual_node(ui, detector_id)
     detector_widgets = _ui_widgets(ui, detector_id)
     editor_widgets = _ui_widgets(ui, editor_id)
     detailer_widgets = _ui_widgets(ui, detailer_id)
     detector_type = detector_ui["type"]
+
     detector = {
-        "inputs": {"model_name": detector_widgets[0]},
+        "inputs": {"model_name": _detailer_widget(detector_widgets, 0, "")},
         "class_type": detector_type,
         "_meta": {"title": detector_ui.get("title") or detector_type},
     }
-    editor_inputs = {
-        "wildcard": editor_widgets[0],
+
+    # 提示词与管道编辑:UI 为空时注入部位专属正向细节提示词。
+    wildcard_text = editor_widgets[0] if (editor_widgets and editor_widgets[0]) else preset.get("wildcard", "")
+    editor_inputs: dict[str, Any] = {
+        "wildcard": wildcard_text,
         "Select to add LoRA": "Select the LoRA to add to the text",
         "Select to add Wildcard": "Select the Wildcard to add to the text",
-        "detailer_pipe": ["18", 0],
+        "detailer_pipe": [str(DETAILER_PIPE_ID), 0],
         config["detector_input"]: [str(detector_id), 0],
     }
+    if name == "nsfw":
+        # 基础管道自带 bbox_detector(人脸检测器),NSFW 必须隔离为纯分割检测,
+        # 否则双检测器会互相干扰掩码生成。
+        editor_inputs["bbox_detector"] = None
+        editor_inputs["segm_detector"] = [str(detector_id), 0]
     editor = {
         "inputs": editor_inputs,
         "class_type": "EditDetailerPipe",
         "_meta": {"title": _visual_node(ui, editor_id).get("title") or f"{name.title()} Detailer Pipe"},
     }
+
+    # 步数与去噪强度:预设优先,其次模板值,最后校验安全区间。
+    steps_val = preset.get("steps", _detailer_widget(detailer_widgets, 5, 20))
+    if isinstance(steps_val, bool) or not isinstance(steps_val, int) or steps_val < DETAILER_MIN_STEPS:
+        steps_val = preset.get("steps", 20)
+
+    denoise_val = preset.get("denoise", _detailer_widget(detailer_widgets, 9, 0.4))
+    if (
+        isinstance(denoise_val, bool)
+        or not isinstance(denoise_val, (int, float))
+        or not DETAILER_DENOISE_RANGE[0] <= denoise_val <= DETAILER_DENOISE_RANGE[1]
+    ):
+        denoise_val = preset.get("denoise", 0.4)
+
+    # 尺度与视野:眼睛强制小尺寸避免融化形变,手部保证足够外扩上下文。
+    guide_size = preset.get("guide_size", _detailer_widget(detailer_widgets, 0, 512))
+    if name == "eyes":
+        guide_size = min(guide_size, DETAILER_EYES_MAX_GUIDE_SIZE)
+    max_size = preset.get("max_size", _detailer_widget(detailer_widgets, 2, 1024))
+    bbox_crop_factor = preset.get(
+        "bbox_crop_factor", _detailer_widget(detailer_widgets, 15, 3.0)
+    )
+    if name == "hand":
+        bbox_crop_factor = max(bbox_crop_factor, DETAILER_HAND_MIN_CROP_FACTOR)
+
     detailer_inputs = {
         "image": image,
         "detailer_pipe": [str(editor_id), 0],
-        "guide_size": detailer_widgets[0],
-        "guide_size_for": detailer_widgets[1],
-        "max_size": detailer_widgets[2],
+        "guide_size": guide_size,
+        "guide_size_for": _detailer_widget(detailer_widgets, 1, True),
+        "max_size": max_size,
         "seed": ["37", 0],
-        "steps": detailer_widgets[5],
-        "cfg": detailer_widgets[6],
-        "sampler_name": detailer_widgets[7],
-        "scheduler": detailer_widgets[8],
-        "denoise": detailer_widgets[9],
-        "feather": detailer_widgets[10],
-        "noise_mask": detailer_widgets[11],
-        "force_inpaint": detailer_widgets[12],
-        "bbox_threshold": detailer_widgets[13],
-        "bbox_dilation": detailer_widgets[14],
-        "bbox_crop_factor": detailer_widgets[15],
-        "sam_detection_hint": detailer_widgets[16],
-        "sam_dilation": detailer_widgets[17],
-        "sam_threshold": detailer_widgets[18],
-        "sam_bbox_expansion": detailer_widgets[19],
-        "sam_mask_hint_threshold": detailer_widgets[20],
-        "sam_mask_hint_use_negative": detailer_widgets[21],
-        "drop_size": detailer_widgets[22],
-        "refiner_ratio": detailer_widgets[23],
-        "cycle": detailer_widgets[24],
-        "noise_mask_feather": detailer_widgets[26],
+        "steps": steps_val,
+        "cfg": _detailer_widget(detailer_widgets, 6, 4.0),
+        "sampler_name": _detailer_widget(detailer_widgets, 7, DEFAULT_SAMPLER),
+        "scheduler": _detailer_widget(detailer_widgets, 8, DEFAULT_SCHEDULER),
+        "denoise": denoise_val,
+        "feather": preset.get("feather", _detailer_widget(detailer_widgets, 10, 10)),
+        "noise_mask": _detailer_widget(detailer_widgets, 11, True),
+        "force_inpaint": _detailer_widget(detailer_widgets, 12, True),
+        "bbox_threshold": _detailer_widget(detailer_widgets, 13, 0.5),
+        "bbox_dilation": _detailer_widget(detailer_widgets, 14, 10),
+        "bbox_crop_factor": bbox_crop_factor,
+        "sam_detection_hint": _detailer_widget(detailer_widgets, 16, "center-1"),
+        "sam_dilation": _detailer_widget(detailer_widgets, 17, 0),
+        "sam_threshold": _detailer_widget(detailer_widgets, 18, 0.93),
+        "sam_bbox_expansion": _detailer_widget(detailer_widgets, 19, 0),
+        "sam_mask_hint_threshold": _detailer_widget(detailer_widgets, 20, 0.7),
+        "sam_mask_hint_use_negative": _detailer_widget(detailer_widgets, 21, "False"),
+        "drop_size": _detailer_widget(detailer_widgets, 22, 10),
+        "refiner_ratio": _detailer_widget(detailer_widgets, 23, 0.2),
+        "cycle": _detailer_widget(detailer_widgets, 24, 1),
+        "noise_mask_feather": _detailer_widget(detailer_widgets, 26, 20),
         "tiled_encode": ["50", 0],
         "tiled_decode": ["50", 0],
     }
@@ -897,6 +988,12 @@ def render_workflows(
     api["5"]["inputs"]["model"] = model_ref
     if "26" in api:
         api["26"]["inputs"]["model"] = model_ref
+
+    # 确保 Detailer 基础管道使用干净的主模型/CFGZeroStar,绕过 Node 26 (DifferentialDiffusion)。
+    # 差异扩散的 timestep 遮罩二值化截断会让 Detailer 采样在遮罩内无法收敛,解码呈现为平涂色块。
+    detailer_pipe = api.get(str(DETAILER_PIPE_ID))
+    if isinstance(detailer_pipe, dict) and isinstance(detailer_pipe.get("inputs"), dict):
+        detailer_pipe["inputs"]["model"] = model_ref
 
     second_sampler = settings["second_sampler"]
     if second_sampler["enabled"]:

@@ -394,6 +394,110 @@ class WorkflowTests(unittest.TestCase):
                 api, _ = render_workflows(self.api, self.ui, settings, 11, 12, "test")
                 self.assertEqual(api["51"]["inputs"]["scale_by"], percent / 100)
 
+    def test_detailer_pipe_bypasses_differential_diffusion(self):
+        # 回归:Node 18 的 model 若指向 Node 26(DifferentialDiffusion),
+        # 遮罩内去噪无法收敛,局部重绘会退化为纯色色块。
+        for cfg_zero_star in (False, True):
+            with self.subTest(cfg_zero_star=cfg_zero_star):
+                api, _ = render_workflows(
+                    self.api,
+                    self.ui,
+                    {
+                        **DEFAULT_SETTINGS,
+                        "cfg_zero_star": cfg_zero_star,
+                        "hires": {**DEFAULT_SETTINGS["hires"], "enabled": False},
+                        "detailers": {**DEFAULT_SETTINGS["detailers"], "hand": True},
+                    },
+                    11,
+                    12,
+                    "test",
+                )
+                expected = ["49", 0] if cfg_zero_star else ["2", 0]
+                self.assertEqual(api["18"]["inputs"]["model"], expected)
+                self.assertNotEqual(api["18"]["inputs"]["model"], ["26", 0])
+
+    def test_hand_detailer_uses_safe_crop_and_sampling_params(self):
+        api, _ = render_workflows(
+            self.api,
+            self.ui,
+            {
+                **DEFAULT_SETTINGS,
+                "hires": {**DEFAULT_SETTINGS["hires"], "enabled": False},
+                "detailers": {**DEFAULT_SETTINGS["detailers"], "hand": True},
+            },
+            11,
+            12,
+            "test",
+        )
+        hand = api["27"]["inputs"]
+        self.assertGreaterEqual(hand["bbox_crop_factor"], 2.8)
+        self.assertGreaterEqual(hand["steps"], 15)
+        self.assertLessEqual(hand["denoise"], 0.5)
+        self.assertEqual(hand["guide_size"], 512)
+        # 模板自带 wildcard 时保留模板值,仅在为空时注入部位专属提示词。
+        self.assertTrue(api["13"]["inputs"]["wildcard"])
+
+    def test_eyes_detailer_keeps_small_guide_size(self):
+        api, _ = render_workflows(
+            self.api,
+            self.ui,
+            {
+                **DEFAULT_SETTINGS,
+                "hires": {**DEFAULT_SETTINGS["hires"], "enabled": False},
+                "detailers": {**DEFAULT_SETTINGS["detailers"], "eyes": True},
+            },
+            11,
+            12,
+            "test",
+        )
+        eyes = api["30"]["inputs"]
+        self.assertLessEqual(eyes["guide_size"], 256)
+        self.assertLessEqual(eyes["max_size"], 512)
+        self.assertLessEqual(eyes["denoise"], 0.5)
+        self.assertTrue(api["16"]["inputs"]["wildcard"])
+
+    def test_nsfw_editor_uses_segm_detector_only(self):
+        api, _ = render_workflows(
+            self.api,
+            self.ui,
+            {
+                **DEFAULT_SETTINGS,
+                "hires": {**DEFAULT_SETTINGS["hires"], "enabled": False},
+                "detailers": {**DEFAULT_SETTINGS["detailers"], "nsfw": True},
+            },
+            11,
+            12,
+            "test",
+        )
+        editor = api["14"]["inputs"]
+        self.assertEqual(editor["segm_detector"], ["9", 0])
+        self.assertIsNone(editor["bbox_detector"])
+        self.assertEqual(api["9"]["inputs"]["model_name"], "segm/ntd11_anime_nsfw_segm_v5-variant1.pt")
+
+    def test_detailer_widgets_out_of_range_fall_back_to_presets(self):
+        # 模板索引错位时 steps/denoise 会读到越界值,必须回退到部位推荐值。
+        ui = copy.deepcopy(self.ui)
+        hand_ui = next(node for node in ui["nodes"] if node["id"] == 27)
+        hand_ui["widgets_values"][5] = 1
+        hand_ui["widgets_values"][9] = 1.0
+        hand_ui["widgets_values"][15] = 1.0
+        api, _ = render_workflows(
+            self.api,
+            ui,
+            {
+                **DEFAULT_SETTINGS,
+                "hires": {**DEFAULT_SETTINGS["hires"], "enabled": False},
+                "detailers": {**DEFAULT_SETTINGS["detailers"], "hand": True},
+            },
+            11,
+            12,
+            "test",
+        )
+        hand = api["27"]["inputs"]
+        self.assertEqual(hand["steps"], 20)
+        self.assertEqual(hand["denoise"], 0.4)
+        self.assertGreaterEqual(hand["bbox_crop_factor"], 2.8)
+
     def test_each_detailer_and_full_chain_keep_declared_order(self):
         node_for = {"hand": "27", "nsfw": "28", "face": "29", "eyes": "30"}
         for enabled_names in (("hand",), ("nsfw",), ("face",), ("eyes",), tuple(node_for)):
