@@ -331,8 +331,10 @@ class PromptCatalog:
         self._official = {}
         self._items["expression"] = [self._to_entry("expression", item) for item in EXPRESSION_DATA]
         self._items["expression"] = [item for item in self._items["expression"] if item]
+        # expression 池来自内置数据,不在 DATA_FILES 中,必须在此单独建立索引,
+        # 否则 tools_dir 存在时 _by_id 会缺失全部表情条目,导致选中/抽取永远为空。
+        self._by_id.update({item["id"]: item for item in self._items["expression"]})
         if not self.tools_dir:
-            self._by_id.update({item["id"]: item for item in self._items["expression"]})
             return
         js_dir = self.tools_dir / "js"
         official_path = js_dir / "character_official_data.json"
@@ -488,11 +490,25 @@ class PromptCatalog:
         page: int = 1,
         limit: int = 48,
         selection: dict[str, Any] | None = None,
+        # === 屏蔽池(隔离池)支持 ===
+        blocked_ids: set[str] | None = None,
+        blocked_only: bool = False,
     ) -> dict[str, Any]:
         self._check_section(section)
         category_values = list(categories or ([] if not category else ([category] if isinstance(category, str) else category)))
         trait_values = [normalize_text(value) for value in (traits or []) if normalize_text(value)]
         entries = self._items[section]
+
+        # === 核心屏蔽过滤:在首轮筛选前完成,保证分页无空洞 ===
+        b_ids = {str(value) for value in (blocked_ids or set())}
+        if blocked_only:
+            # 隔离池视图:只展示被屏蔽的预设。
+            entries = [item for item in entries if item["id"] in b_ids]
+        elif b_ids:
+            # 正常视图:从源头排除所有被屏蔽预设。
+            entries = [item for item in entries if item["id"] not in b_ids]
+        # ======================================================
+
         if custom_group:
             custom_group_ids = (
                 {custom_group}
@@ -602,9 +618,16 @@ class PromptCatalog:
         categories.sort(key=lambda item: (order.get(item["value"], len(order)), item["value"].lower()))
         return {"categories": categories, "traits": counted("traits", limit=len(values) * 128)}
 
-    def resolve_selection(self, section: str, selection: dict[str, Any], count: int, rng: random.Random) -> list[dict[str, Any]]:
+    def resolve_selection(
+        self,
+        section: str,
+        selection: dict[str, Any],
+        count: int,
+        rng: random.Random,
+        blocked_ids: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
         self._check_section(section)
-        candidates = self._selection_candidates(section, selection)
+        candidates = self._selection_candidates(section, selection, blocked_ids)
         if count < 1:
             return []
         if not candidates:
@@ -641,13 +664,17 @@ class PromptCatalog:
             values = [value for value in values if normalize_text(value) not in PERSON_TAGS]
         return values
 
-    def validate_settings(self, settings: dict[str, Any]) -> None:
+    def validate_settings(
+        self, settings: dict[str, Any], blocked_ids: dict[str, set[str]] | None = None
+    ) -> None:
         for section in SECTIONS:
             if not settings.get(f"random_{section}"):
                 continue
             selection = settings.get("pools", {}).get(section, {})
             count = int(settings.get(f"random_{section}_count", 1))
-            available = self._selection_candidates(section, selection)
+            available = self._selection_candidates(
+                section, selection, (blocked_ids or {}).get(section)
+            )
             if not available:
                 raise CatalogError(f"{section} 随机池为空，请先选择候选项")
             if count > len(available):
@@ -655,7 +682,12 @@ class PromptCatalog:
             if section == "pose" and self._compatible_pose_sample(available, count, random.Random(0)) is None:
                 raise CatalogError(self._pose_conflict_error(available, count))
 
-    def resolve_prompt(self, settings: dict[str, Any], prompt_seed: int) -> dict[str, Any]:
+    def resolve_prompt(
+        self,
+        settings: dict[str, Any],
+        prompt_seed: int,
+        blocked_ids: dict[str, set[str]] | None = None,
+    ) -> dict[str, Any]:
         rng = random.Random(prompt_seed)
         selected: dict[str, list[dict[str, Any]]] = {section: [] for section in SECTIONS}
         composer_parts = compose_people_tags(settings.get("female_count", 0), settings.get("male_count", 0))
@@ -675,6 +707,7 @@ class PromptCatalog:
                 settings.get("pools", {}).get(section, {}),
                 settings.get(f"random_{section}_count", 1),
                 rng,
+                (blocked_ids or {}).get(section),
             )
             selected[section] = entries
             for entry in entries:
@@ -760,15 +793,30 @@ class PromptCatalog:
         if section not in SECTIONS:
             raise CatalogError(f"不支持的随机池: {section}")
 
-    def _selection_candidates(self, section: str, selection: dict[str, Any]) -> list[dict[str, Any]]:
+    def _selection_candidates(
+        self,
+        section: str,
+        selection: dict[str, Any],
+        blocked_ids: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
         mode = selection.get("mode", "include") if isinstance(selection, dict) else "include"
         # 候选顺序参与固定种子抽样,必须按选中顺序确定性去重:
         # set 的迭代顺序随进程哈希种子变化,会让"复现"在重启后抽出不同条目。
         ids = list(dict.fromkeys(str(value) for value in selection.get("ids", []))) if isinstance(selection, dict) else []
         excluded = {str(value) for value in selection.get("excluded_ids", [])} if isinstance(selection, dict) else set()
+        # 底层防御:屏蔽项永远不进入候选,即使旧草稿把它们写进了 ids。
+        blocked = {str(value) for value in (blocked_ids or set())}
+        if blocked:
+            excluded = excluded | blocked
         if mode == "all":
             return [item for item in self._items[section] if item["id"] not in excluded]
-        return [self._by_id[item_id] for item_id in ids if item_id in self._by_id and self._by_id[item_id]["section"] == section]
+        return [
+            self._by_id[item_id]
+            for item_id in ids
+            if item_id in self._by_id
+            and self._by_id[item_id]["section"] == section
+            and item_id not in blocked
+        ]
 
     @staticmethod
     def _compatible_pose_sample(candidates: list[dict[str, Any]], count: int, rng: random.Random) -> list[dict[str, Any]] | None:

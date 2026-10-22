@@ -1,0 +1,63 @@
+/* ===== 预设屏蔽池(隔离池) ===== */
+/* 卡片工具栏的屏蔽切换按钮 */
+.item-tools .block-toggle {
+  background: transparent;
+  border: none;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.45;
+  transition: opacity 0.2s ease, transform 0.15s ease;
+  padding: 4px;
+  border-radius: 4px;
+}
+.item-tools .block-toggle:hover {
+  opacity: 0.95;
+  transform: scale(1.15);
+}
+.item-tools .block-toggle.blocked {
+  opacity: 1;
+  color: var(--danger, #ff453a);
+}
+
+/* 侧栏隔离池入口 */
+.blocked-vault-section {
+  margin-bottom: 4px;
+}
+.blocked-vault-bar {
+  margin-bottom: 8px;
+}
+.blocked-vault-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: var(--r-sm, 12px);
+  background: rgba(255, 69, 58, 0.08);
+  border: 1px dashed rgba(255, 69, 58, 0.3);
+  color: var(--text, inherit);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+.blocked-vault-btn:hover {
+  background: rgba(255, 69, 58, 0.16);
+  border-color: rgba(255, 69, 58, 0.6);
+}
+.blocked-vault-btn.active {
+  background: rgba(255, 69, 58, 0.25);
+  border-color: var(--danger, #ff453a);
+  color: var(--danger, #ff453a);
+}
+.blocked-vault-btn .pill-badge {
+  min-width: 20px;
+  text-align: center;
+}
+
+/* 隔离池卡片标识 */
+.pool-item.is-blocked-item {
+  border-color: rgba(255, 69, 58, 0.4);
+  background: rgba(255, 69, 58, 0.03);
+}

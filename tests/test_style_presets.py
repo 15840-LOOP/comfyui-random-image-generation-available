@@ -79,7 +79,8 @@ class StylePresetTests(unittest.IsolatedAsyncioTestCase):
     async def test_atomic_save_leaves_valid_json_without_temp_files(self):
         await self.store.create({"name": "Atomic", "settings": snapshot(), "favorite": False})
         payload = json.loads(self.path.read_text(encoding="utf-8"))
-        self.assertEqual(payload["version"], 1)
+        # 两级分类结构落盘版本号为 2。
+        self.assertEqual(payload["version"], 2)
         self.assertEqual(payload["items"][0]["name"], "Atomic")
         self.assertEqual(list(self.path.parent.glob("style-presets-*.json")), [])
 
@@ -340,7 +341,15 @@ class StylePresetTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["all_total"], 0)
         self.assertEqual(
             payload["collections"],
-            [{"id": 1, "name": "默认收藏", "is_default": True, "count": 0}],
+            [
+                {
+                    "id": 1,
+                    "name": "默认收藏",
+                    "is_default": True,
+                    "parent_id": None,
+                    "count": 0,
+                }
+            ],
         )
 
     async def test_create_collection_assigns_incrementing_ids(self):
@@ -361,7 +370,9 @@ class StylePresetTests(unittest.IsolatedAsyncioTestCase):
             await self.store.create_collection("风景")
 
     async def test_list_collections_counts_members(self):
-        collection = await self.store.create_collection("风景")
+        # 预设只能归入子文件夹,母文件夹计数为其下子文件夹的去重聚合数。
+        parent = await self.store.create_collection("风景")
+        collection = await self.store.create_collection("山景", parent_id=parent["id"])
         first = await self.store.create({"name": "A", "settings": snapshot()})
         second = await self.store.create({"name": "B", "settings": snapshot()})
         await self.store.set_preset_collections(first["id"], [collection["id"]])
@@ -372,19 +383,28 @@ class StylePresetTests(unittest.IsolatedAsyncioTestCase):
         counts = {item["id"]: item["count"] for item in payload["collections"]}
         self.assertEqual(counts[1], 1)
         self.assertEqual(counts[collection["id"]], 2)
+        self.assertEqual(counts[parent["id"]], 2)
 
     async def test_delete_collection_unbinds_presets_without_deleting_them(self):
-        collection = await self.store.create_collection("风景")
+        parent = await self.store.create_collection("风景")
+        collection = await self.store.create_collection("山景", parent_id=parent["id"])
         created = await self.store.create({"name": "Kept", "settings": snapshot()})
         await self.store.set_preset_collections(created["id"], [1, collection["id"]])
 
-        self.assertTrue(await self.store.delete_collection(collection["id"]))
-        self.assertFalse(await self.store.delete_collection(collection["id"]))
+        # 删除子分类:返回级联信息,预设仅解绑该子分类。
+        result = await self.store.delete_collection(collection["id"])
+        self.assertTrue(result["deleted"])
+        self.assertFalse(result["is_parent"])
+        self.assertEqual(result["deleted_sub_ids"], [collection["id"]])
         # 预设本体必须保留,仅解绑被删除的分类。
         self.assertEqual(len(self.store.items), 1)
         item = self.store.items[0]
         self.assertEqual(item["collection_ids"], [1])
         self.assertTrue(item["favorite"])
+
+        # 重复删除同一分类应抛出 KeyError(由路由层转为 404)。
+        with self.assertRaises(KeyError):
+            await self.store.delete_collection(collection["id"])
 
     async def test_default_collection_cannot_be_deleted(self):
         with self.assertRaisesRegex(WorkflowError, "默认收藏夹不能删除"):
@@ -408,7 +428,8 @@ class StylePresetTests(unittest.IsolatedAsyncioTestCase):
             await self.store.toggle_default_favorite("missing")
 
     async def test_set_preset_collections_syncs_favorite_flag(self):
-        collection = await self.store.create_collection("风景")
+        parent = await self.store.create_collection("风景")
+        collection = await self.store.create_collection("山景", parent_id=parent["id"])
         created = await self.store.create({"name": "Sync", "settings": snapshot()})
 
         updated = await self.store.set_preset_collections(created["id"], [collection["id"]])
@@ -419,22 +440,31 @@ class StylePresetTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated["collection_ids"], [1, collection["id"]])
         self.assertTrue(updated["favorite"])
 
-        with self.assertRaisesRegex(WorkflowError, "收藏夹不存在"):
+        with self.assertRaisesRegex(WorkflowError, "所选分类不存在或为母文件夹"):
             await self.store.set_preset_collections(created["id"], [999])
+        # 母文件夹不能直接作为预设归属。
+        with self.assertRaisesRegex(WorkflowError, "所选分类不存在或为母文件夹"):
+            await self.store.set_preset_collections(created["id"], [parent["id"]])
         with self.assertRaises(KeyError):
             await self.store.set_preset_collections("missing", [])
 
     async def test_collections_persist_and_reload(self):
-        collection = await self.store.create_collection("风景")
+        parent = await self.store.create_collection("风景")
+        collection = await self.store.create_collection("山景", parent_id=parent["id"])
         created = await self.store.create({"name": "Persisted", "settings": snapshot()})
         await self.store.set_preset_collections(created["id"], [collection["id"]])
 
         payload = json.loads(self.path.read_text(encoding="utf-8"))
         self.assertEqual(payload["collections"][0]["id"], 1)
         self.assertEqual(payload["collections"][1]["name"], "风景")
+        self.assertIsNone(payload["collections"][1]["parent_id"])
+        self.assertEqual(payload["collections"][2]["parent_id"], parent["id"])
 
         reloaded = StylePresetStore(self.path)
-        self.assertEqual([item["id"] for item in reloaded.collections], [1, collection["id"]])
+        self.assertEqual(
+            [item["id"] for item in reloaded.collections],
+            [1, parent["id"], collection["id"]],
+        )
         item = next(entry for entry in reloaded.items if entry["id"] == created["id"])
         self.assertEqual(item["collection_ids"], [collection["id"]])
 
@@ -470,7 +500,17 @@ class StylePresetTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(by_id["preset_old_plain"]["collection_ids"], [])
         self.assertFalse(by_id["preset_old_plain"]["favorite"])
         # 老文件缺少根级 collections 时自动补默认收藏夹。
-        self.assertEqual(store.collections, [{"id": 1, "name": "默认收藏", "is_default": True}])
+        self.assertEqual(
+            store.collections,
+            [
+                {
+                    "id": 1,
+                    "name": "默认收藏",
+                    "is_default": True,
+                    "parent_id": None,
+                }
+            ],
+        )
 
     def test_collection_ids_containing_default_implies_favorite(self):
         payload = {
@@ -527,8 +567,14 @@ class StylePresetTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.store.delete_batch(["missing"]), 0)
 
     async def test_batch_update_collections_add_remove_set(self):
-        landscape = await self.store.create_collection("风景")
-        portrait = await self.store.create_collection("人像")
+        landscape_parent = await self.store.create_collection("风景")
+        landscape = await self.store.create_collection(
+            "山景", parent_id=landscape_parent["id"]
+        )
+        portrait_parent = await self.store.create_collection("人像")
+        portrait = await self.store.create_collection(
+            "半身", parent_id=portrait_parent["id"]
+        )
         first = await self.store.create({"name": "BatchOne", "settings": snapshot()})
         second = await self.store.create({"name": "BatchTwo", "settings": snapshot()})
 

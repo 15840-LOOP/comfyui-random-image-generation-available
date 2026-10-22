@@ -15,6 +15,7 @@
     })();
   </script>
   <link rel="stylesheet" href="/static/styles.css?v=20261017-collections-align-fix">
+  <link rel="stylesheet" href="/static/blocked-vault.css?v=20261022-blocked-vault">
 </head>
 <body>
   <div class="ambient" aria-hidden="true"></div>
@@ -168,6 +169,13 @@
                 </svg>
               </button>
             </div>
+            <button id="btnArchiveCleanup" class="button secondary compact archive-cleanup-btn" type="button" title="保留最新N百张，清理未收藏旧图">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <polyline points="3 6 5 6 21 6"></polyline>
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+              </svg>
+              <span>清理旧图</span>
+            </button>
             <button id="btnToggleBatchMode" class="batch-mode-toggle" type="button" aria-pressed="false" title="批量管理作品">
               <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <path d="M9 11l3 3L22 4"></path>
@@ -208,10 +216,19 @@
             <button id="btnCreatePreset" class="button primary" type="button"><span aria-hidden="true">+</span> 新建预设</button>
           </div>
         </div>
+        <!-- 母文件夹胶囊栏 -->
         <div class="collections-bar-wrapper">
           <nav id="presetCollectionsBar" class="collections-bar collections-scroll-track" aria-label="预设库分类过滤"></nav>
           <div class="collections-fixed-actions">
-            <button id="btnPresetAddCollection" class="collection-pill pill-add" type="button" title="新建分类" aria-label="新建分类">＋ 新建</button>
+            <button id="btnPresetAddCollection" class="collection-pill pill-add" type="button" title="新建母文件夹" aria-label="新建母文件夹">＋ 新建母类</button>
+          </div>
+        </div>
+
+        <!-- 子文件夹胶囊行:默认在“全部”或“默认收藏”时隐藏,选中具体母文件夹时展开 -->
+        <div id="presetSubCollectionsBarWrapper" class="collections-bar-wrapper sub-collections-wrapper" hidden>
+          <nav id="presetSubCollectionsBar" class="collections-bar collections-scroll-track sub-collections-track" aria-label="预设库子分类过滤"></nav>
+          <div class="collections-fixed-actions">
+            <button id="btnPresetAddSubCollection" class="collection-pill pill-add sub-pill-add" type="button" title="在当前母分类下新建子文件夹" aria-label="新建子文件夹">＋ 新建子类</button>
           </div>
         </div>
         <div id="presetError" class="field-error" role="status" hidden></div>
@@ -500,13 +517,41 @@
     </form>
   </dialog>
 
-  <dialog id="presetCollectionsDialog" class="compact-dialog">
+  <dialog id="presetCollectionsDialog" class="compact-dialog preset-collections-dialog">
     <form id="presetCollectionsForm" method="dialog">
-      <div class="dialog-heading"><div><span class="kicker">PRESET COLLECTIONS</span><h2>归类预设</h2></div><button id="closePresetCollections" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button></div>
+      <div class="dialog-heading">
+        <div>
+          <span class="kicker">PRESET CLASSIFICATION</span>
+          <h2 id="presetCollectionsTitle">归类预设</h2>
+        </div>
+        <button id="closePresetCollections" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button>
+      </div>
       <p id="presetCollectionsSummary" class="import-hint"></p>
-      <div id="presetCollectionsChecklist" class="favorite-groups"></div>
+
+      <!-- 两级分类勾选容器（顶部单列默认收藏，下方按母文件夹卡片分组展示子文件夹） -->
+      <div id="presetCollectionsChecklist" class="preset-collections-tree"></div>
+
+      <!-- 快捷新建子文件夹区域：支持原地选择母文件夹并快速新增子类 -->
+      <div class="preset-dialog-quick-create">
+        <div class="quick-create-fields">
+          <label class="field">
+            <span>目标母类</span>
+            <select id="presetDialogParentSelect" aria-label="选择所属母文件夹"></select>
+          </label>
+          <label class="field">
+            <span>新子文件夹名称</span>
+            <input id="presetDialogSubNameInput" type="text" maxlength="40" placeholder="例如：特写、全身" autocomplete="off">
+          </label>
+        </div>
+        <button id="btnPresetDialogCreateAndCheck" class="button ghost compact" type="button">＋ 新建并勾选</button>
+      </div>
+
       <div id="presetCollectionsError" class="field-error" role="alert" hidden></div>
-      <div class="dialog-actions"><span></span><span></span><button id="cancelPresetCollections" class="button ghost" type="button">取消</button><button class="button primary" type="submit">保存归类</button></div>
+      <div class="dialog-actions">
+        <span></span><span></span>
+        <button id="cancelPresetCollections" class="button ghost" type="button">取消</button>
+        <button class="button primary" type="submit">保存归类</button>
+      </div>
     </form>
   </dialog>
 
@@ -526,6 +571,42 @@
       <p class="record-delete-warning">⚠️ 确定要删除该作品吗？此操作将同步永久删除本地物理图片文件，不可撤销。</p>
       <div id="recordDeleteError" class="field-error" role="alert" hidden></div>
       <div class="dialog-actions"><span></span><span></span><button id="cancelRecordDelete" class="button ghost" type="button">取消</button><button id="confirmRecordDelete" class="button danger" type="submit">确认删除</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="archiveCleanupDialog" class="compact-dialog archive-cleanup-dialog">
+    <form id="archiveCleanupForm" method="dialog">
+      <div class="dialog-heading">
+        <div>
+          <span class="kicker">STORAGE OPTIMIZATION</span>
+          <h2>作品库清理</h2>
+        </div>
+        <button id="closeArchiveCleanup" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button>
+      </div>
+      <label class="field">
+        <span>保留最新数量</span>
+        <select id="cleanupKeepHundreds">
+          <option value="1">保留最新 100 张</option>
+          <option value="3">保留最新 300 张</option>
+          <option value="5" selected>保留最新 500 张</option>
+          <option value="10">保留最新 1000 张</option>
+          <option value="20">保留最新 2000 张</option>
+        </select>
+      </label>
+      <div id="cleanupPreviewReport" class="cleanup-preview-card" aria-live="polite">
+        <div class="cleanup-stat-row"><span>作品库总计</span><strong id="cleanupStatTotal">-</strong></div>
+        <div class="cleanup-stat-row"><span>最新保留（全量保留）</span><strong id="cleanupStatKeep">-</strong></div>
+        <div class="cleanup-stat-row"><span>早期收藏（受保护）</span><strong id="cleanupStatProtected" class="text-accent">-</strong></div>
+        <div class="cleanup-stat-row highlight"><span>预计删除非收藏</span><strong id="cleanupStatDelete" class="text-danger">-</strong></div>
+        <div class="cleanup-stat-row"><span>预估释放磁盘空间</span><strong id="cleanupStatSize">-</strong></div>
+      </div>
+      <p class="record-delete-warning">⚠️ 此操作将永久删除超出保留范围且未收藏的物理图片文件，无法撤销。</p>
+      <div id="cleanupError" class="field-error" role="alert" hidden></div>
+      <div class="dialog-actions">
+        <span></span><span></span>
+        <button id="cancelArchiveCleanup" class="button ghost" type="button">取消</button>
+        <button id="confirmArchiveCleanup" class="button danger" type="submit" disabled>确认清理</button>
+      </div>
     </form>
   </dialog>
 
@@ -660,6 +741,75 @@
         <span></span><span></span>
         <button id="cancelImageCollections" class="button ghost" type="button">取消</button>
         <button id="saveImageCollections" class="button primary" type="submit">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- ==================== 新建收藏夹 / 分类弹窗 ==================== -->
+  <dialog id="collectionCreateDialog" class="compact-dialog">
+    <form id="collectionCreateForm" method="dialog">
+      <div class="dialog-heading">
+        <div>
+          <span id="collectionCreateKicker" class="kicker">COLLECTION</span>
+          <h2 id="collectionCreateTitle">新建收藏夹</h2>
+        </div>
+        <button id="closeCollectionCreate" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button>
+      </div>
+      <label class="field">
+        <span id="collectionCreateLabel">收藏夹名称</span>
+        <input id="collectionCreateInput" type="text" maxlength="40" placeholder="请输入名称" autocomplete="off" required>
+        <small id="collectionCreateHint" class="field-hint">最多 40 个字符</small>
+      </label>
+      <div id="collectionCreateError" class="field-error" role="alert" hidden></div>
+      <div class="dialog-actions">
+        <span></span><span></span>
+        <button id="cancelCollectionCreate" class="button ghost" type="button">取消</button>
+        <button id="submitCollectionCreate" class="button primary" type="submit">确认创建</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- ==================== 修改收藏夹 / 分类名称弹窗 ==================== -->
+  <dialog id="collectionRenameDialog" class="compact-dialog">
+    <form id="collectionRenameForm" method="dialog">
+      <div class="dialog-heading">
+        <div>
+          <span id="collectionRenameKicker" class="kicker">RENAME COLLECTION</span>
+          <h2 id="collectionRenameTitle">重命名收藏夹</h2>
+        </div>
+        <button id="closeCollectionRename" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button>
+      </div>
+      <label class="field">
+        <span id="collectionRenameLabel">收藏夹名称</span>
+        <input id="collectionRenameInput" type="text" maxlength="40" placeholder="请输入新名称" autocomplete="off" required>
+        <small id="collectionRenameHint" class="field-hint">最多 40 个字符</small>
+      </label>
+      <div id="collectionRenameError" class="field-error" role="alert" hidden></div>
+      <div class="dialog-actions">
+        <span></span><span></span>
+        <button id="cancelCollectionRename" class="button ghost" type="button">取消</button>
+        <button id="submitCollectionRename" class="button primary" type="submit">保存修改</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- ==================== 删除收藏夹 / 分类确认弹窗 ==================== -->
+  <dialog id="collectionDeleteDialog" class="compact-dialog">
+    <form id="collectionDeleteForm" method="dialog">
+      <div class="dialog-heading">
+        <div>
+          <span id="collectionDeleteKicker" class="kicker">DELETE COLLECTION</span>
+          <h2 id="collectionDeleteTitle">删除收藏夹</h2>
+        </div>
+        <button id="closeCollectionDelete" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button>
+      </div>
+      <p id="collectionDeleteSummary" class="delete-group-summary"></p>
+      <p class="collection-delete-hint" id="collectionDeleteHint">提示：收藏夹删除后，作品本身不会被删除，仅解除分类归属。</p>
+      <div id="collectionDeleteError" class="field-error" role="alert" hidden></div>
+      <div class="dialog-actions">
+        <span></span><span></span>
+        <button id="cancelCollectionDelete" class="button ghost" type="button">取消</button>
+        <button id="confirmCollectionDelete" class="button danger" type="submit">确认删除</button>
       </div>
     </form>
   </dialog>

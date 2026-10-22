@@ -8,7 +8,7 @@ version = "0.4.0"
 description = "基于 ComfyUI 与 Anima Tools 的本地随机生图工作台"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { file = "LICENSE" }
+license = { file = "LICENSE.txt" }
 dependencies = [
     # aiohttp 4 将移除当前使用的字符串 app key 等 API,先锁定在 3.x
     "aiohttp>=3.9,<4",

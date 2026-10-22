@@ -27,10 +27,10 @@ class FakeTemplates:
 
 
 class FakeCatalog:
-    def validate_settings(self, settings):
+    def validate_settings(self, settings, blocked_ids=None):
         return None
 
-    def resolve_prompt(self, settings, prompt_seed):
+    def resolve_prompt(self, settings, prompt_seed, blocked_ids=None):
         return {
             "composer_prompt": "requested character, ",
             "full_prompt": "quality, requested character, ",
@@ -101,7 +101,7 @@ class RedrawCatalog(FakeCatalog):
     def prompt_parts(self, item, section, character_detail="trigger_tags", strip_person_tags=False):
         return [item.get("prompt") or item.get("title") or ""]
 
-    def resolve_prompt(self, settings, prompt_seed):
+    def resolve_prompt(self, settings, prompt_seed, blocked_ids=None):
         pose_id = "pose:new" if prompt_seed % 2 else "pose:old"
         pose = {"id": pose_id, "title": pose_id, "prompt": pose_id}
         character = {"id": "character:new", "title": "character:new", "prompt": "character:new"}

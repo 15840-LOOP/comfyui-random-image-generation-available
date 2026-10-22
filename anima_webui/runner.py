@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Any
 
 from .comfy import ComfyAborted, ComfyError, extract_images, extract_positive_prompt
+from .blocked_prompts import BlockedPromptStore
 from .catalog import PromptCatalog
 from .history import HistoryStore
 from .prompt_rules import PromptRuleStore
@@ -55,6 +56,7 @@ class BatchManager:
         comfy: Any,
         catalog: PromptCatalog | None = None,
         prompt_rules: PromptRuleStore | None = None,
+        blocked_prompts: BlockedPromptStore | None = None,
     ):
         self.templates = templates
         self.history = history
@@ -65,6 +67,7 @@ class BatchManager:
         self.client_id = str(uuid.uuid4())
         self.catalog = catalog
         self.prompt_rules = prompt_rules
+        self.blocked_prompts = blocked_prompts
         # 排队中的批次(仅内存;WebUI 重启后队列清空,历史记录只在真正开跑时创建)。
         self.queue: list[dict[str, Any]] = []
         self.shutting_down = False
@@ -78,6 +81,15 @@ class BatchManager:
 
     def active(self) -> bool:
         return bool(self.task and not self.task.done())
+
+    def _blocked_map(self) -> dict[str, set[str]]:
+        """抽取阶段同样排除屏蔽项,防止旧草稿把已屏蔽预设带进生成结果。"""
+        if self.blocked_prompts is None:
+            return {}
+        return {
+            section: self.blocked_prompts.get_blocked_ids(section)
+            for section in PROMPT_SECTIONS
+        }
 
     @staticmethod
     def _validate_regeneration(value: Any) -> dict[str, Any] | None:
@@ -212,7 +224,7 @@ class BatchManager:
             if self.catalog and not (
                 regeneration and regeneration.get("frozen_positive_prompt")
             ):
-                self.catalog.validate_settings(settings)
+                self.catalog.validate_settings(settings, self._blocked_map())
             lora_filenames = getattr(self.comfy, "lora_filenames", None)
             if not lora_filenames:
                 raise ComfyError("ComfyUI 客户端无法读取 LoRA 列表")
@@ -337,7 +349,7 @@ class BatchManager:
                 date_folder = datetime.now().strftime("%Y-%m-%d")
                 prefix = f"AnimaRandom/{date_folder}/{batch_id}/image"
                 resolved = self._resolve_regeneration(settings, prompt_seed, regeneration) if regeneration else (
-                    self.catalog.resolve_prompt(settings, prompt_seed) if self.catalog else {
+                    self.catalog.resolve_prompt(settings, prompt_seed, self._blocked_map()) if self.catalog else {
                         "composer_prompt": "",
                         "full_prompt": "",
                         "selected": {},
@@ -539,7 +551,9 @@ class BatchManager:
                 "selected": fixed_selection,
             }
         if mode == "settings_reroll":
-            return self.catalog.resolve_prompt(settings, prompt_seed) if self.catalog else {
+            return self.catalog.resolve_prompt(
+                settings, prompt_seed, self._blocked_map()
+            ) if self.catalog else {
                 "composer_prompt": "",
                 "full_prompt": "",
                 "selected": {},
@@ -561,7 +575,9 @@ class BatchManager:
                     )
                 )
             redraw_settings[f"fixed_{section}"] = ", ".join(parts)
-        resolved = self.catalog.resolve_prompt(redraw_settings, prompt_seed)
+        resolved = self.catalog.resolve_prompt(
+            redraw_settings, prompt_seed, self._blocked_map()
+        )
         merged = copy.deepcopy(resolved["selected"])
         for section, entries in fixed_selection.items():
             merged[section] = copy.deepcopy(entries)

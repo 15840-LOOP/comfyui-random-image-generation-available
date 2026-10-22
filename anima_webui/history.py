@@ -410,6 +410,85 @@ class HistoryStore:
         self.connection.commit()
         return cursor.rowcount > 0
 
+    # ---------- 作品库清理(保留最新 K 张 + 收藏保护) ----------
+    @staticmethod
+    def _validate_keep_count(keep_count: Any) -> int:
+        """校验保留张数必须为正整数,防御注入与非正数。"""
+        if isinstance(keep_count, bool):
+            raise CollectionError("keep_count 必须是正整数")
+        try:
+            value = int(keep_count)
+        except (TypeError, ValueError) as error:
+            raise CollectionError("keep_count 必须是正整数") from error
+        if value <= 0:
+            raise CollectionError("keep_count 必须是正整数")
+        return value
+
+    async def preview_cleanup_non_favorites(self, keep_count: int) -> dict[str, Any]:
+        """统计清理分布:总数、最新保留数、早期收藏保护数、待删除数。"""
+        return await self._call(self._preview_cleanup_non_favorites, keep_count)
+
+    def _preview_cleanup_non_favorites(self, keep_count: int) -> dict[str, Any]:
+        keep = self._validate_keep_count(keep_count)
+        row = self.connection.execute(
+            """
+            WITH latest_k AS (
+                SELECT id FROM images ORDER BY id DESC LIMIT :keep_count
+            ),
+            favorite_ids AS (
+                SELECT DISTINCT image_id AS id FROM image_collection_members
+            )
+            SELECT
+                (SELECT COUNT(*) FROM images) AS total_count,
+                (SELECT COUNT(*) FROM images WHERE id IN (SELECT id FROM latest_k)) AS kept_latest_count,
+                (SELECT COUNT(DISTINCT images.id) FROM images
+                 JOIN favorite_ids ON images.id = favorite_ids.id
+                 WHERE images.id NOT IN (SELECT id FROM latest_k)) AS protected_early_favorite_count,
+                (SELECT COUNT(*) FROM images
+                 WHERE id NOT IN (SELECT id FROM latest_k)
+                   AND id NOT IN (SELECT id FROM favorite_ids)) AS to_delete_count
+            """,
+            {"keep_count": keep},
+        ).fetchone()
+        return {
+            "total": int(row["total_count"]),
+            "keep_latest": int(row["kept_latest_count"]),
+            "protected_favorites": int(row["protected_early_favorite_count"]),
+            "to_delete": int(row["to_delete_count"]),
+        }
+
+    async def fetch_cleanup_candidates(self, keep_count: int) -> list[dict[str, Any]]:
+        """取出所有命中 Delete 集合的图片元数据(供业务层定位磁盘文件)。"""
+        return await self._call(self._fetch_cleanup_candidates, keep_count)
+
+    def _fetch_cleanup_candidates(self, keep_count: int) -> list[dict[str, Any]]:
+        keep = self._validate_keep_count(keep_count)
+        rows = self.connection.execute(
+            """
+            WITH latest_k AS (
+                SELECT id FROM images ORDER BY id DESC LIMIT :keep_count
+            ),
+            favorite_ids AS (
+                SELECT DISTINCT image_id AS id FROM image_collection_members
+            )
+            SELECT id, filename, subfolder, file_type
+            FROM images
+            WHERE id NOT IN (SELECT id FROM latest_k)
+              AND id NOT IN (SELECT id FROM favorite_ids)
+            ORDER BY id ASC
+            """,
+            {"keep_count": keep},
+        ).fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "filename": str(row["filename"]),
+                "subfolder": str(row["subfolder"] or ""),
+                "file_type": str(row["file_type"] or "output"),
+            }
+            for row in rows
+        ]
+
     async def delete_images_batch(self, image_ids: list[int]) -> int:
         """批量删除图片记录,返回实际删除的行数。
 
@@ -625,6 +704,65 @@ class HistoryStore:
             "sort_order": next_order,
             "created_at": timestamp,
             "item_count": 0,
+        }
+
+    async def update_collection(self, collection_id: int, name: str) -> dict[str, Any]:
+        return await self._call(self._update_collection, collection_id, name)
+
+    def _update_collection(self, collection_id: int, name: str) -> dict[str, Any]:
+        cleaned = str(name or "").strip()
+        if not cleaned:
+            raise CollectionError("收藏夹名称不能为空")
+        if len(cleaned) > 40:
+            raise CollectionError("收藏夹名称不能超过 40 个字符")
+
+        row = self.connection.execute(
+            "SELECT id, name, is_default, sort_order, created_at FROM gallery_collections WHERE id = ?",
+            (collection_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(collection_id)
+        if int(row["is_default"]) or int(row["id"]) == DEFAULT_COLLECTION_ID:
+            raise CollectionError("默认收藏夹不可修改名称")
+
+        def _count() -> int:
+            return int(
+                self.connection.execute(
+                    "SELECT COUNT(*) FROM image_collection_members WHERE collection_id = ?",
+                    (collection_id,),
+                ).fetchone()[0]
+            )
+
+        # 名称未变化:幂等返回,跳过写操作。
+        if str(row["name"]) == cleaned:
+            return {
+                "id": int(row["id"]),
+                "name": cleaned,
+                "is_default": False,
+                "sort_order": int(row["sort_order"]),
+                "created_at": str(row["created_at"]),
+                "item_count": _count(),
+            }
+
+        # 排重校验(大小写不敏感,排除自身)。
+        duplicate = self.connection.execute(
+            "SELECT 1 FROM gallery_collections WHERE name = ? COLLATE NOCASE AND id != ?",
+            (cleaned, collection_id),
+        ).fetchone()
+        if duplicate is not None:
+            raise CollectionError(f"已存在同名收藏夹: {cleaned}")
+
+        self.connection.execute(
+            "UPDATE gallery_collections SET name = ? WHERE id = ?", (cleaned, collection_id)
+        )
+        self.connection.commit()
+        return {
+            "id": int(row["id"]),
+            "name": cleaned,
+            "is_default": False,
+            "sort_order": int(row["sort_order"]),
+            "created_at": str(row["created_at"]),
+            "item_count": _count(),
         }
 
     async def delete_collection(self, collection_id: int) -> bool:

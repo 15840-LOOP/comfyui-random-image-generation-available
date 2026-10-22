@@ -18,6 +18,7 @@ from urllib.parse import urlencode, urlsplit
 from aiohttp import web
 
 from .comfy import ComfyClient, ComfyError
+from .blocked_prompts import BlockedPromptStore
 from .catalog import CatalogError, PromptCatalog, SECTIONS, resolve_output_dir
 from .custom_prompts import CustomPromptStore
 from .favorites import FavoritesService, favorite_key
@@ -45,6 +46,7 @@ FAVORITES_KEY: web.AppKey[Any] = web.AppKey("favorites", object)
 STYLE_PRESETS_KEY: web.AppKey[Any] = web.AppKey("style_presets", object)
 LORA_TRIGGER_OVERRIDES_KEY: web.AppKey[Any] = web.AppKey("lora_trigger_overrides", object)
 PROMPT_RULES_KEY: web.AppKey[Any] = web.AppKey("prompt_rules", object)
+BLOCKED_PROMPTS_KEY: web.AppKey[Any] = web.AppKey("blocked_prompts", object)
 ALLOWED_HOSTNAMES_KEY: web.AppKey[frozenset[str]] = web.AppKey(
     "allowed_hostnames", frozenset
 )
@@ -215,6 +217,7 @@ def create_app(
     style_presets_path: str | Path | None = None,
     lora_trigger_overrides_path: str | Path | None = None,
     prompt_replacements_path: str | Path | None = None,
+    blocked_prompts_path: str | Path | None = None,
     anima_tools_dir: str | Path | None = None,
     trusted_hostnames: set[str] | frozenset[str] | None = None,
     data_dir: str | Path | None = None,
@@ -241,9 +244,14 @@ def create_app(
     style_presets = StylePresetStore(
         style_presets_path or storage / "style_presets.json", prompt_rules
     )
+    blocked_prompts = BlockedPromptStore(
+        blocked_prompts_path or storage / "blocked_prompts.json"
+    )
     templates = WorkflowTemplates.load(root / "templates")
     startup_defaults = configure_resources(templates, resource_paths)
-    manager = BatchManager(templates, history, client, catalog, prompt_rules)
+    manager = BatchManager(
+        templates, history, client, catalog, prompt_rules, blocked_prompts
+    )
 
     startup_warnings = [
         *history.load_warnings,
@@ -251,6 +259,7 @@ def create_app(
         *style_presets.load_warnings,
         *lora_trigger_overrides.load_warnings,
         *prompt_rules.load_warnings,
+        *blocked_prompts.load_warnings,
     ]
 
     app = web.Application(middlewares=[error_middleware, local_only_middleware])
@@ -269,6 +278,7 @@ def create_app(
     app[STYLE_PRESETS_KEY] = style_presets
     app[LORA_TRIGGER_OVERRIDES_KEY] = lora_trigger_overrides
     app[PROMPT_RULES_KEY] = prompt_rules
+    app[BLOCKED_PROMPTS_KEY] = blocked_prompts
     app[OUTPUT_DIR_KEY] = resolved_output_dir
 
     async def favorite_keys(section: str, collection: str = "") -> set[str] | None:
@@ -321,6 +331,8 @@ def create_app(
         collection = str(params.get("collection") or "")
         sort = str(params.get("sort") or "")
         custom_group = str(params.get("custom_group") or "")
+        blocked_only = str(params.get("blocked_only") or "").lower() in {"1", "true"}
+        blocked_set = blocked_prompts.get_blocked_ids(section)
         keys = await favorite_keys(section, collection or ("__all__" if sort == "favorite-first" else ""))
         result = catalog.search(
             section,
@@ -340,13 +352,19 @@ def create_app(
             page=page,
             limit=limit,
             selection=selection,
+            blocked_ids=blocked_set,
+            blocked_only=blocked_only,
         )
+        result["blocked_count"] = len(blocked_set)
         return web.json_response(result)
 
     async def pool(request: web.Request) -> web.Response:
         params: dict[str, Any] = {
             key: request.query.get(key, "")
-            for key in ("q", "gender", "hair", "eye", "series", "custom_group", "collection", "sort")
+            for key in (
+                "q", "gender", "hair", "eye", "series", "custom_group",
+                "collection", "sort", "blocked_only",
+            )
         }
         params["page"] = request.query.get("page", "1")
         params["limit"] = request.query.get("limit", "48")
@@ -361,6 +379,27 @@ def create_app(
         params["traits"] = body.get("traits") if isinstance(body.get("traits"), list) else []
         selection = body.get("selection") if isinstance(body.get("selection"), dict) else None
         return await _pool_response(request.match_info["section"], params, selection)
+
+    async def get_blocked_prompts(_: web.Request) -> web.Response:
+        return web.json_response(blocked_prompts.snapshot())
+
+    async def toggle_blocked_prompt(request: web.Request) -> web.Response:
+        section = request.match_info["section"]
+        if section not in SECTIONS:
+            raise WorkflowError(f"不支持的卡池: {section}")
+        body = await _json_body(request)
+        item_id = body.get("id")
+        if not item_id:
+            raise WorkflowError("id 不能为空")
+        is_blocked = await blocked_prompts.toggle(section, str(item_id))
+        return web.json_response(
+            {
+                "section": section,
+                "id": str(item_id),
+                "blocked": is_blocked,
+                "blocked_count": len(blocked_prompts.get_blocked_ids(section)),
+            }
+        )
 
     async def get_favorites(request: web.Request) -> web.Response:
         return web.json_response(await favorites.get(request.match_info["section"]))
@@ -695,14 +734,31 @@ def create_app(
         name = body.get("name")
         if not isinstance(name, str):
             raise WorkflowError("name 必须是字符串")
-        return web.json_response(await style_presets.create_collection(name), status=201)
+        # 可选 parent_id:缺省创建母文件夹,给出时创建其下的子文件夹。
+        raw_parent = body.get("parent_id")
+        parent_id: int | None = None
+        if raw_parent is not None:
+            try:
+                parent_id = int(raw_parent)
+            except (TypeError, ValueError) as error:
+                raise WorkflowError("parent_id 必须是整数") from error
+        created = await style_presets.create_collection(name, parent_id=parent_id)
+        return web.json_response(created, status=201)
 
     async def delete_style_preset_collection(request: web.Request) -> web.Response:
         collection_id = int(request.match_info["collection_id"])
-        # 默认收藏夹(ID:1)由 store 抛出 WorkflowError,中间件统一转为 400。
-        if not await style_presets.delete_collection(collection_id):
-            raise KeyError(collection_id)
-        return web.json_response({"deleted": True, "id": collection_id})
+        # 默认收藏夹(ID:1)与不存在的分类由 store 抛出 WorkflowError/KeyError,
+        # 中间件统一转为 400/404;返回值携带级联删除的子分类信息。
+        result = await style_presets.delete_collection(collection_id)
+        return web.json_response(result)
+
+    async def update_style_preset_collection(request: web.Request) -> web.Response:
+        collection_id = int(request.match_info["collection_id"])
+        body = await _json_body(request)
+        name = body.get("name")
+        if not isinstance(name, str):
+            raise WorkflowError("name 必须是字符串")
+        return web.json_response(await style_presets.update_collection(collection_id, name))
 
     async def toggle_style_preset_default_favorite(request: web.Request) -> web.Response:
         preset_id = request.match_info["preset_id"]
@@ -855,6 +911,14 @@ def create_app(
         collection_id = int(request.match_info["collection_id"])
         await history.delete_collection(collection_id)
         return web.json_response({"deleted": True, "id": collection_id})
+
+    async def update_gallery_collection(request: web.Request) -> web.Response:
+        collection_id = int(request.match_info["collection_id"])
+        body = await _json_body(request)
+        name = body.get("name")
+        if not isinstance(name, str):
+            raise CollectionError("name 必须是字符串")
+        return web.json_response(await history.update_collection(collection_id, name))
 
     async def toggle_default_favorite(request: web.Request) -> web.Response:
         image_id = int(request.match_info["image_id"])
@@ -1161,6 +1225,101 @@ def create_app(
             }
         )
 
+    def _cleanup_keep_count(body: dict[str, Any]) -> int:
+        """校验 keep_hundreds(1~1000)并换算为保留张数 K = keep_hundreds * 100。"""
+        raw = body.get("keep_hundreds")
+        if isinstance(raw, bool):
+            raise WorkflowError("keep_hundreds 必须是 1 到 1000 之间的整数")
+        try:
+            hundreds = int(raw)
+        except (TypeError, ValueError) as error:
+            raise WorkflowError("keep_hundreds 必须是 1 到 1000 之间的整数") from error
+        if hundreds < 1 or hundreds > 1000:
+            raise WorkflowError("keep_hundreds 必须是 1 到 1000 之间的整数")
+        return hundreds * 100
+
+    async def cleanup_preview(request: web.Request) -> web.Response:
+        """清理预检:统计待删除数量并估算可释放的磁盘空间(不产生任何写操作)。"""
+        body = await _json_body(request)
+        keep_count = _cleanup_keep_count(body)
+        stats = await history.preview_cleanup_non_favorites(keep_count)
+        output_dir = app[OUTPUT_DIR_KEY]
+        candidates = await history.fetch_cleanup_candidates(keep_count)
+        estimated_bytes = 0
+        for record in candidates:
+            target = _resolve_image_disk_path(output_dir, record)
+            if target is None:
+                continue
+            try:
+                if target.is_file():
+                    estimated_bytes += int(target.stat().st_size)
+            except OSError as error:
+                # 单个文件元数据读取失败不影响整体预估。
+                logger.debug("读取待清理文件大小失败(%s): %s", target, error)
+        return web.json_response(
+            {
+                "total": stats["total"],
+                "keep_latest": stats["keep_latest"],
+                "protected_favorites": stats["protected_favorites"],
+                "to_delete": stats["to_delete"],
+                "estimated_bytes": estimated_bytes,
+                "estimated_mb": round(estimated_bytes / (1024 * 1024), 1),
+            }
+        )
+
+    async def cleanup_execute(request: web.Request) -> web.Response:
+        """执行清理:先删物理文件,再单事务批量删库记录。
+
+        - 生成任务运行中直接拒绝(409),避免索引漂移与文件句柄冲突;
+        - FileNotFoundError 视为幽灵记录,照常清理数据库;
+        - OSError(文件被占用)保留该记录不删库,避免磁盘与数据库不一致;
+        - 数据库删除按每批 500 个 ID 分块,规避 SQLite 占位符上限。
+        """
+        body = await _json_body(request)
+        keep_count = _cleanup_keep_count(body)
+        manager = app[MANAGER_KEY]
+        snapshot = manager.snapshot() or {}
+        if snapshot.get("status") in ("running", "stopping"):
+            raise BatchConflict("当前正在生成图片，请等待批次完成后再执行清理")
+        output_dir = app[OUTPUT_DIR_KEY]
+        candidates = await history.fetch_cleanup_candidates(keep_count)
+        cleanup_ids: list[int] = []
+        file_deleted = 0
+        file_missing = 0
+        file_failed = 0
+        for record in candidates:
+            target = _resolve_image_disk_path(output_dir, record)
+            if target is None:
+                # 路径非法或未配置输出目录:无法定位物理文件,保留记录不删库。
+                file_failed += 1
+                continue
+            try:
+                if not target.is_file():
+                    file_missing += 1
+                else:
+                    await asyncio.to_thread(target.unlink)
+                    file_deleted += 1
+            except FileNotFoundError:
+                file_missing += 1
+            except OSError as error:
+                logger.warning("清理本地物理图片文件失败(%s): %s", target, error)
+                file_failed += 1
+                continue
+            cleanup_ids.append(int(record["id"]))
+        deleted_records = 0
+        for start in range(0, len(cleanup_ids), 500):
+            chunk = cleanup_ids[start : start + 500]
+            deleted_records += await history.delete_images_batch(chunk)
+        return web.json_response(
+            {
+                "deleted": deleted_records,
+                "file_deleted": file_deleted,
+                "file_missing": file_missing,
+                "file_failed": file_failed,
+                "keep_latest": keep_count,
+            }
+        )
+
     async def batch_export_history(request: web.Request) -> web.Response:
         """批量导出作品到已配置的导出文件夹,同名文件自动递增重命名防覆盖。"""
         body = await _json_body(request)
@@ -1380,6 +1539,14 @@ def create_app(
         r"/api/style-presets/collections/{collection_id:\d+}",
         delete_style_preset_collection,
     )
+    app.router.add_patch(
+        r"/api/style-presets/collections/{collection_id:\d+}",
+        update_style_preset_collection,
+    )
+    app.router.add_put(
+        r"/api/style-presets/collections/{collection_id:\d+}",
+        update_style_preset_collection,
+    )
     # 批量静态段同样必须先于 /api/style-presets/{preset_id} 动态段注册,
     # 否则 "batch-delete" / "batch-collections" 会被当作 preset_id 吞掉。
     app.router.add_post("/api/style-presets/batch-delete", batch_delete_style_presets)
@@ -1414,6 +1581,10 @@ def create_app(
     app.router.add_delete("/api/favorites/{section}/groups/{group_id}", delete_favorite_group)
     app.router.add_get("/api/pools/{section}", pool)
     app.router.add_post("/api/pools/{section}/query", pool_query)
+    app.router.add_get("/api/blocked-prompts", get_blocked_prompts)
+    app.router.add_post(
+        r"/api/blocked-prompts/{section}/toggle", toggle_blocked_prompt
+    )
     app.router.add_get("/api/custom-prompts", list_custom_prompts)
     app.router.add_post("/api/custom-prompts", create_custom_prompt)
     app.router.add_put("/api/custom-prompts/{item_id}", update_custom_prompt)
@@ -1435,10 +1606,19 @@ def create_app(
     app.router.add_post("/api/history/batch-delete", batch_delete_history)
     app.router.add_post("/api/history/batch-export", batch_export_history)
     app.router.add_post("/api/history/batch-collections", batch_update_collections)
+    # 作品库清理:同样必须先于 /api/history/{image_id} 正则路由注册。
+    app.router.add_post("/api/history/cleanup-preview", cleanup_preview)
+    app.router.add_post("/api/history/cleanup-execute", cleanup_execute)
     app.router.add_get("/api/gallery/collections", list_gallery_collections)
     app.router.add_post("/api/gallery/collections", create_gallery_collection)
     app.router.add_delete(
         r"/api/gallery/collections/{collection_id:\d+}", delete_gallery_collection
+    )
+    app.router.add_patch(
+        r"/api/gallery/collections/{collection_id:\d+}", update_gallery_collection
+    )
+    app.router.add_put(
+        r"/api/gallery/collections/{collection_id:\d+}", update_gallery_collection
     )
     app.router.add_post(
         r"/api/history/{image_id:\d+}/toggle-default-favorite", toggle_default_favorite

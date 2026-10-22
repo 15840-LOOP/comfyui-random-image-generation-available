@@ -452,11 +452,20 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
             ids.append((await created.json())["id"])
 
         # 批量分类:add 模式挂到新建收藏夹。
-        collection = await self.client.post(
+        # 两级分类后预设只能归入子文件夹,故先建母文件夹再建子文件夹。
+        parent = await self.client.post(
             "/api/style-presets/collections", json={"name": "批量测试"}
         )
+        self.assertEqual(parent.status, 201)
+        parent_id = (await parent.json())["id"]
+        collection = await self.client.post(
+            "/api/style-presets/collections",
+            json={"name": "批量子类", "parent_id": parent_id},
+        )
         self.assertEqual(collection.status, 201)
-        collection_id = (await collection.json())["id"]
+        collection_payload = await collection.json()
+        self.assertEqual(collection_payload["parent_id"], parent_id)
+        collection_id = collection_payload["id"]
 
         added = await self.client.post(
             "/api/style-presets/batch-collections",
@@ -1702,6 +1711,267 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(payload["updated_count"], 1)
         finally:
             await client.close()
+
+    # ---------- 作品库清理:保留最新 K 张 + 收藏保护 ----------
+    async def _seed_cleanup_images(self, client, output_dir, count):
+        """跑 count 个单图批次,并为每条记录写入独立子目录的物理文件。
+
+        返回按 id 升序的 (image_id, 物理路径) 列表。
+        """
+        items = await self._seed_images(client, count)
+        seeded = []
+        for index, item in enumerate(sorted(items, key=lambda value: value["id"])):
+            subfolder = output_dir / f"clean-{index}"
+            subfolder.mkdir(parents=True, exist_ok=True)
+            physical = subfolder / item["filename"]
+            physical.write_bytes(b"x" * 1024)
+            store = client.server.app[HISTORY_KEY]
+            store.connection.execute(
+                "UPDATE images SET subfolder = ? WHERE id = ?",
+                (f"clean-{index}", item["id"]),
+            )
+            store.connection.commit()
+            seeded.append((item["id"], physical))
+        return seeded
+
+    async def test_cleanup_preview_and_execute_protect_favorites_and_latest(self):
+        output_dir = Path(self.temp.name) / "output-cleanup"
+        output_dir.mkdir()
+        client = await self._batch_client(output_dir, "cleanup")
+        try:
+            seeded = await self._seed_cleanup_images(client, output_dir, 5)
+            ids = [image_id for image_id, _ in seeded]
+            # 最早的一张加入收藏:即使超出保留范围也必须受保护。
+            favorite_id = ids[0]
+            await client.post(
+                "/api/history/batch-collections",
+                json={"image_ids": [favorite_id], "collection_ids": [1], "mode": "add"},
+            )
+
+            preview = await client.post(
+                "/api/history/cleanup-preview", json={"keep_hundreds": 1}
+            )
+            self.assertEqual(preview.status, 200)
+            payload = await preview.json()
+            self.assertEqual(payload["total"], 5)
+            self.assertEqual(payload["keep_latest"], 5)
+            self.assertEqual(payload["to_delete"], 0)
+            self.assertEqual(payload["estimated_bytes"], 0)
+
+            # 直接以 keep_count=2 调用数据层,验证集合运算与收藏保护。
+            store = client.server.app[HISTORY_KEY]
+            stats = await store.preview_cleanup_non_favorites(2)
+            self.assertEqual(stats["total"], 5)
+            self.assertEqual(stats["keep_latest"], 2)
+            self.assertEqual(stats["protected_favorites"], 1)
+            self.assertEqual(stats["to_delete"], 2)
+            candidates = await store.fetch_cleanup_candidates(2)
+            self.assertEqual([item["id"] for item in candidates], ids[1:3])
+
+            # 执行清理:仅删除非收藏且非最新的记录,收藏与最新记录保留。
+            executed = await client.post(
+                "/api/history/cleanup-execute", json={"keep_hundreds": 1}
+            )
+            self.assertEqual(executed.status, 200)
+            result = await executed.json()
+            self.assertEqual(result["deleted"], 0)
+            self.assertEqual(result["file_deleted"], 0)
+            self.assertEqual(result["file_missing"], 0)
+            for _, physical in seeded:
+                self.assertTrue(physical.exists())
+        finally:
+            await client.close()
+
+    async def test_cleanup_execute_removes_files_and_tolerates_missing(self):
+        output_dir = Path(self.temp.name) / "output-cleanup-exec"
+        output_dir.mkdir()
+        client = await self._batch_client(output_dir, "cleanup-exec")
+        try:
+            seeded = await self._seed_cleanup_images(client, output_dir, 4)
+            ids = [image_id for image_id, _ in seeded]
+            store = client.server.app[HISTORY_KEY]
+            # 手动移走第二张的物理文件,模拟幽灵记录。
+            seeded[1][1].unlink()
+            # 收藏第三张,使其免于清理。
+            await client.post(
+                "/api/history/batch-collections",
+                json={"image_ids": [ids[2]], "collection_ids": [1], "mode": "add"},
+            )
+
+            # 直接以 keep_count=1 执行:仅保留最新一张。
+            candidates = await store.fetch_cleanup_candidates(1)
+            self.assertEqual([item["id"] for item in candidates], [ids[0], ids[1]])
+            for record in candidates:
+                target = output_dir / f"clean-{ids.index(record['id'])}" / record["filename"]
+                try:
+                    target.unlink()
+                except FileNotFoundError:
+                    pass
+            deleted = await store.delete_images_batch([item["id"] for item in candidates])
+            self.assertEqual(deleted, 2)
+            remaining = await (await client.get("/api/history")).json()
+            self.assertEqual(
+                sorted(item["id"] for item in remaining["items"]), sorted([ids[2], ids[3]])
+            )
+        finally:
+            await client.close()
+
+    async def test_cleanup_rejects_invalid_keep_hundreds(self):
+        client = await self._batch_client(
+            Path(self.temp.name) / "output-cleanup-invalid", "cleanup-invalid"
+        )
+        try:
+            for payload in (
+                {"keep_hundreds": 0},
+                {"keep_hundreds": 1001},
+                {"keep_hundreds": "abc"},
+                {"keep_hundreds": True},
+                {},
+            ):
+                response = await client.post("/api/history/cleanup-preview", json=payload)
+                self.assertEqual(response.status, 400, payload)
+                self.assertIn("keep_hundreds", (await response.json())["error"])
+        finally:
+            await client.close()
+
+    async def test_cleanup_execute_conflicts_with_running_batch(self):
+        client = await self._batch_client(
+            Path(self.temp.name) / "output-cleanup-conflict", "cleanup-conflict"
+        )
+        try:
+            manager = client.server.app[MANAGER_KEY]
+            with mock.patch.object(
+                manager, "snapshot", return_value={"status": "running"}
+            ):
+                response = await client.post(
+                    "/api/history/cleanup-execute", json={"keep_hundreds": 1}
+                )
+            self.assertEqual(response.status, 409)
+            self.assertIn("正在生成图片", (await response.json())["error"])
+        finally:
+            await client.close()
+
+    # ---------- 收藏夹 / 分类重命名 ----------
+    async def test_rename_gallery_collection(self):
+        created = await self.client.post("/api/gallery/collections", json={"name": "旧名字"})
+        self.assertEqual(created.status, 201)
+        collection_id = (await created.json())["id"]
+
+        renamed = await self.client.patch(
+            f"/api/gallery/collections/{collection_id}", json={"name": "  新名字  "}
+        )
+        self.assertEqual(renamed.status, 200)
+        payload = await renamed.json()
+        self.assertEqual(payload["name"], "新名字")
+        self.assertEqual(payload["id"], collection_id)
+        self.assertFalse(payload["is_default"])
+        self.assertIn("item_count", payload)
+
+        # PUT 与 PATCH 等价。
+        put = await self.client.put(
+            f"/api/gallery/collections/{collection_id}", json={"name": "再改一次"}
+        )
+        self.assertEqual(put.status, 200)
+        self.assertEqual((await put.json())["name"], "再改一次")
+
+        # 幂等:同名重复提交仍返回 200 且名称不变。
+        again = await self.client.patch(
+            f"/api/gallery/collections/{collection_id}", json={"name": "再改一次"}
+        )
+        self.assertEqual(again.status, 200)
+        self.assertEqual((await again.json())["name"], "再改一次")
+
+        listing = await (await self.client.get("/api/gallery/collections")).json()
+        names = {item["id"]: item["name"] for item in listing["collections"]}
+        self.assertEqual(names[collection_id], "再改一次")
+
+    async def test_rename_gallery_collection_rejects_invalid(self):
+        first = await self.client.post("/api/gallery/collections", json={"name": "Alpha"})
+        first_id = (await first.json())["id"]
+        second = await self.client.post("/api/gallery/collections", json={"name": "Beta"})
+        second_id = (await second.json())["id"]
+
+        cases = [
+            (first_id, {"name": "   "}, "不能为空"),
+            (first_id, {"name": "x" * 41}, "40"),
+            (first_id, {"name": "beta"}, "同名"),
+            (first_id, {"name": 123}, "name 必须是字符串"),
+            (999999, {"name": "任意"}, None),
+        ]
+        for collection_id, body, text in cases:
+            with self.subTest(collection_id=collection_id, body=body):
+                response = await self.client.patch(
+                    f"/api/gallery/collections/{collection_id}", json=body
+                )
+                if text is None:
+                    self.assertEqual(response.status, 404)
+                else:
+                    self.assertEqual(response.status, 400)
+                    self.assertIn(text, (await response.json())["error"])
+
+        # 默认收藏夹(ID=1)禁止改名。
+        default = await self.client.patch(
+            "/api/gallery/collections/1", json={"name": "改名默认夹"}
+        )
+        self.assertEqual(default.status, 400)
+        self.assertIn("默认收藏夹", (await default.json())["error"])
+
+        # 失败请求不得污染数据。
+        listing = await (await self.client.get("/api/gallery/collections")).json()
+        names = {item["id"]: item["name"] for item in listing["collections"]}
+        self.assertEqual(names[first_id], "Alpha")
+        self.assertEqual(names[second_id], "Beta")
+
+    async def test_rename_style_preset_collection(self):
+        created = await self.client.post(
+            "/api/style-presets/collections", json={"name": "旧分类"}
+        )
+        self.assertEqual(created.status, 201)
+        collection_id = (await created.json())["id"]
+
+        renamed = await self.client.patch(
+            f"/api/style-presets/collections/{collection_id}", json={"name": "新分类"}
+        )
+        self.assertEqual(renamed.status, 200)
+        payload = await renamed.json()
+        self.assertEqual(payload["name"], "新分类")
+        self.assertEqual(payload["id"], collection_id)
+        self.assertIn("count", payload)
+
+        put = await self.client.put(
+            f"/api/style-presets/collections/{collection_id}", json={"name": "最终分类"}
+        )
+        self.assertEqual(put.status, 200)
+        self.assertEqual((await put.json())["name"], "最终分类")
+
+        listing = await (await self.client.get("/api/style-presets/collections")).json()
+        names = {item["id"]: item["name"] for item in listing["collections"]}
+        self.assertEqual(names[collection_id], "最终分类")
+
+        # 默认分类(ID=1)禁止改名。
+        default = await self.client.patch(
+            "/api/style-presets/collections/1", json={"name": "改名默认分类"}
+        )
+        self.assertEqual(default.status, 400)
+        self.assertIn("默认收藏夹", (await default.json())["error"])
+
+        # 不存在与非法参数。
+        missing = await self.client.patch(
+            "/api/style-presets/collections/999999", json={"name": "任意"}
+        )
+        self.assertEqual(missing.status, 404)
+        blank = await self.client.patch(
+            f"/api/style-presets/collections/{collection_id}", json={"name": "  "}
+        )
+        self.assertEqual(blank.status, 400)
+        too_long = await self.client.patch(
+            f"/api/style-presets/collections/{collection_id}", json={"name": "y" * 101}
+        )
+        self.assertEqual(too_long.status, 400)
+        not_str = await self.client.patch(
+            f"/api/style-presets/collections/{collection_id}", json={"name": None}
+        )
+        self.assertEqual(not_str.status, 400)
 
 
 if __name__ == "__main__":

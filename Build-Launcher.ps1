@@ -12,7 +12,7 @@ Add-Type -AssemblyName System.IO.Compression
 $stream = [System.IO.File]::Create($payload)
 $archive = [System.IO.Compression.ZipArchive]::new($stream, [System.IO.Compression.ZipArchiveMode]::Create)
 try {
-    $files = @('run.py', 'LICENSE', 'pyproject.toml')
+    $files = @('run.py', 'LICENSE.txt', 'pyproject.toml')
     foreach ($folder in @('anima_webui', 'static', 'templates')) {
         $files += Get-ChildItem -LiteralPath (Join-Path $repo $folder) -File -Recurse |
             Where-Object { $_.FullName -notmatch '__pycache__|\.pyc$' } |

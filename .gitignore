@@ -1,15 +1,75 @@
-# Python 编译缓存（必须忽略）
+# ============================================================
+# Anima Random Studio - Git 忽略规则
+# ============================================================
+
+# ---------- Python 编译缓存 ----------
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
 
-# 测试缓存
+# ---------- 测试与类型检查缓存 ----------
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
 
-# 运行时生成数据与本地输出
+# ---------- 虚拟环境 ----------
+.venv/
+venv/
+env/
+ENV/
+*.egg-info/
+build/
+*.egg
+
+# ---------- 运行时用户数据（首次启动自动重建，绝不提交） ----------
 data/
 
-# Windows 本地快捷方式与系统缓存
+# ---------- 数据文件的损坏备份与原子写入临时文件 ----------
+*.corrupt.bak
+*.corrupt-*.bak
+*.tmp
+
+# ---------- 打包与分发产物 ----------
+dist/
+*.zip
+
+# ---------- 启动器（.NET / WinUI 3）构建产物 ----------
+launcher/payload.zip
+launcher/**/bin/
+launcher/**/obj/
+launcher/**/*.user
+launcher/**/*.suo
+launcher/**/.vs/
+launcher/**/AppPackages/
+launcher/**/BundleArtifacts/
+
+# ---------- 启动器下载临时文件 ----------
+*.part
+*.download
+
+# ---------- Windows 本地文件 ----------
 *.lnk
 Thumbs.db
 Desktop.ini
+ehthumbs.db
+$RECYCLE.BIN/
+
+# ---------- 编辑器与 IDE ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ---------- 日志 ----------
+*.log
+logs/
+
+# ---------- 环境变量与密钥 ----------
+.env
+.env.*
+!.env.example
