@@ -1,6 +1,6 @@
 # Anima Random Studio
 
-基于 [ComfyUI](https://www.google.com/search?q=https%3A%2F%2Fgithub.com%2Fcomfyanonymous%2FComfyUI "null") 与 [Anima Tools](https://www.google.com/search?q=https%3A%2F%2Fgithub.com%2Fnregret%2FComfyui-Anima-Tools "null") 生态深度构建的**本地轻量化随机生图工作台与全生命周期数字资产管理系统**。
+基于 [ComfyUI](https://github.com/comfyanonymous/ComfyUI) 与 [Anima Tools](https://github.com/nregret/Comfyui-Anima-Tools) 生态深度构建的**本地轻量化随机生图工作台与全生命周期数字资产管理系统**。
 
 核心功能：批量组合tag自动画图；作品和预设资产便捷管理；提供极度清晰明了的工作台界面，便于新手小白快速上手ai画图。
 
@@ -149,7 +149,7 @@
 
 ### 步骤一：获取项目文件
 
-1. 前往本项目的 [Releases 页面](https://www.google.com/search?q=https%3A%2F%2Fgithub.com%2F15840-LOOP%2Fcomfyui-random-image-generation-available%2Freleases "null") 下载最新发布的压缩包（ZIP）。
+1. 前往本项目的 [release页](https://github.com/15840-LOOP/comfyui-random-image-generation-available/releases)下载最新发布的压缩包（ZIP）。
 
 2. 将压缩包解压并放置在你的 **ComfyUI 整合包根目录下**（与 `ComfyUI` 核心目录平级）。
 - 典型目录结构示意：
@@ -169,12 +169,12 @@
 
 | **节点项目**                                                                                                                      | **作用说明**                     |
 | ----------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
-| [Comfyui-Anima-Tools](https://www.google.com/search?q=https%3A%2F%2Fgithub.com%2Fnregret%2FComfyui-Anima-Tools "null")        | 提示词词池解析、画师库及角色标签抽取核心（必需）     |
-| [rgthree-comfy](https://www.google.com/search?q=https%3A%2F%2Fgithub.com%2Frgthree%2Frgthree-comfy "null")                    | Power LoRA Loader、种子管理与工作流控制 |
-| [ComfyUI-Impact-Pack](https://www.google.com/search?q=https%3A%2F%2Fgithub.com%2Fltdrdata%2FComfyUI-Impact-Pack "null")       | Detailer 局部修复管线              |
-| [ComfyUI-Impact-Subpack](https://www.google.com/search?q=https%3A%2F%2Fgithub.com%2Fltdrdata%2FComfyUI-Impact-Subpack "null") | Ultralytics 目标检测模型加载支持       |
-| [ComfyUI-Easy-Use](https://www.google.com/search?q=https%3A%2F%2Fgithub.com%2Fyolain%2FComfyUI-Easy-Use "null")               | 高清修复放大辅助支持                   |
-| [ComfyUI-KJNodes](https://www.google.com/search?q=https%3A%2F%2Fgithub.com%2Fkijai%2FComfyUI-KJNodes "null")                  | 图像分辨率与比例辅助预设                 |
+| [Comfyui-Anima-Tools](https://github.com/nregret/Comfyui-Anima-Tools)        | 提示词词池解析、画师库及角色标签抽取核心（必需）     |
+| [rgthree-comfy](https://github.com/rgthree/rgthree-comfy)                    | Power LoRA Loader、种子管理与工作流控制 |
+| [ComfyUI-Impact-Pack](https://github.com/ltdrdata/ComfyUI-Impact-Pack)       | Detailer 局部修复管线              |
+| [ComfyUI-Impact-Subpack](https://github.com/ltdrdata/ComfyUI-Impact-Subpack) | Ultralytics 目标检测模型加载支持       |
+| [ComfyUI-Easy-Use](https://github.com/yolain/ComfyUI-Easy-Use)               | 高清修复放大辅助支持                   |
+| [ComfyUI-KJNodes](https://github.com/kijai/ComfyUI-KJNodes)                  | 图像分辨率与比例辅助预设                 |
 
 > **提示**：安装完成后请检查 `ComfyUI/custom_nodes/` 路径，确保各插件文件夹名称正常，不要带有 `-main` 或 `-master` 等多余后缀。
 
