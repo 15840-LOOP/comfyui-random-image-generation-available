@@ -63,7 +63,22 @@
             <summary><span>收藏画师</span><span id="artistFavoriteCount" class="summary-value">0 位</span><i>+</i></summary>
             <div class="artist-favorites-body">
               <div id="artistFavorites" class="artist-favorites" aria-label="收藏画师快捷入口"></div>
-              <button id="manageArtists" class="button ghost compact" type="button">管理收藏</button>
+              <div class="artist-favorites-actions">
+                <button id="manageArtists" class="button ghost compact" type="button">管理收藏</button>
+                <a class="artist-browse-btn"
+                   href="https://anima.mooshieblob.com/"
+                   target="_blank"
+                   rel="noopener noreferrer"
+                   title="前往 Anima 画风参考库检索画师作品 (在新标签页打开)">
+                  <span class="browse-icon" aria-hidden="true">🎨</span>
+                  <span>画风图库</span>
+                  <svg class="external-arrow" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                    <polyline points="15 3 21 3 21 9"></polyline>
+                    <line x1="10" y1="14" x2="21" y2="3"></line>
+                  </svg>
+                </a>
+              </div>
             </div>
           </details>
         </section>
@@ -359,9 +374,24 @@
         <button id="btnAddArtist" class="button primary compact" type="button">＋ 添加</button>
       </div>
 
-      <!-- 2. 工具栏：原有的“收藏当前输入”降为次级按钮，右侧补充即时搜索框 -->
+      <!-- 2. 工具栏：收藏当前输入 + 浏览画风直达 + 即时搜索框 -->
       <div class="artist-tools-bar">
-        <button id="saveCurrentArtists" class="button secondary compact" type="button" title="将主工作台固定画师框中的内容加入收藏">收藏当前输入</button>
+        <div class="artist-tools-left">
+          <button id="saveCurrentArtists" class="button secondary compact" type="button" title="将主工作台固定画师框中的内容加入收藏">收藏当前输入</button>
+          <a class="artist-browse-btn compact"
+             href="https://anima.mooshieblob.com/"
+             target="_blank"
+             rel="noopener noreferrer"
+             title="前往 Anima 画风参考库检索画师作品">
+            <span class="browse-icon" aria-hidden="true">🎨</span>
+            <span>画风图库</span>
+            <svg class="external-arrow" viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+              <polyline points="15 3 21 3 21 9"></polyline>
+              <line x1="10" y1="14" x2="21" y2="3"></line>
+            </svg>
+          </a>
+        </div>
         <label class="search-field artist-search-field">
           <span aria-hidden="true">⌕</span>
           <input id="artistSearchInput" type="search" placeholder="搜索已收藏画师...">

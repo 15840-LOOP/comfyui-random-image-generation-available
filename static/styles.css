@@ -465,6 +465,103 @@ input:disabled, select:disabled, textarea:disabled { opacity: .5; cursor: not-al
 .artist-favorites-section { margin-top: 10px; border-top: 1px solid var(--separator); }
 .artist-favorites-section summary { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 8px; padding: 12px 0 6px; cursor: pointer; list-style: none; font-size: 11.5px; font-weight: 600; }
 .artist-favorites-body { display: grid; justify-items: start; gap: 8px; padding: 6px 0 4px; }
+
+/* ==================== 画师区操作栏与“画风图库”外链跳转按钮 ==================== */
+.artist-favorites-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  width: 100%;
+  margin-top: 2px;
+}
+
+/* 高颜值 Liquid Glass 风格跳转按钮 */
+.artist-browse-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 33px;
+  padding: 0 12px;
+  color: var(--accent);
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent) 14%, var(--chrome-solid)),
+    color-mix(in srgb, var(--accent) 8%, var(--surface-muted))
+  );
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25), 0 2px 6px -2px color-mix(in srgb, var(--accent) 25%, transparent);
+  backdrop-filter: blur(12px) saturate(160%);
+  -webkit-backdrop-filter: blur(12px) saturate(160%);
+  cursor: pointer;
+  transition: transform var(--motion-medium) var(--spring),
+              border-color var(--motion-fast) ease,
+              box-shadow var(--motion-fast) ease,
+              background var(--motion-fast) ease;
+}
+
+.artist-browse-btn:hover {
+  color: var(--accent-hover, #0077ed);
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent) 22%, var(--chrome-solid)),
+    color-mix(in srgb, var(--accent) 12%, var(--surface-muted))
+  );
+  border-color: color-mix(in srgb, var(--accent) 48%, transparent);
+  transform: translateY(-1.5px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.4), 0 6px 14px -4px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+.artist-browse-btn:active {
+  transform: scale(0.96) translateY(0);
+}
+
+.artist-browse-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.artist-browse-btn .browse-icon {
+  font-size: 11px;
+  line-height: 1;
+}
+
+.artist-browse-btn .external-arrow {
+  flex: 0 0 auto;
+  opacity: 0.75;
+  transition: transform var(--motion-fast) var(--spring), opacity var(--motion-fast) ease;
+}
+
+.artist-browse-btn:hover .external-arrow {
+  opacity: 1;
+  transform: translate(1.5px, -1.5px); /* 悬浮时箭头向右上微弹跳 */
+}
+
+/* 弹窗工具栏适配：左侧成组排布 */
+.artist-tools-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.artist-browse-btn.compact {
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 11px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .artist-browse-btn,
+  .artist-browse-btn .external-arrow { transition: none; }
+  .artist-browse-btn:hover { transform: none; }
+  .artist-browse-btn:hover .external-arrow { transform: none; }
+}
 .artist-favorites { display: flex; flex-wrap: wrap; gap: 6px; }
 .artist-favorites:empty { display: none; }
 .artist-chip { max-width: 180px; display: grid; gap: 1px; padding: 6px 11px; overflow: hidden; color: var(--accent); text-align: left; background: var(--accent-soft); border: 0; border-radius: 10px; transition: transform .4s var(--spring), filter .25s ease; }
