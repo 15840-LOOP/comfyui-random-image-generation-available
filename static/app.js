@@ -129,6 +129,8 @@ const ui = Object.fromEntries(
     "selectedOnly",
     "clearFilters",
     "selectPage",
+    "selectFiltered",
+    "deselectFiltered",
     "selectAllPool",
     "clearPool",
     "favoriteSelection",
@@ -290,6 +292,10 @@ const ui = Object.fromEntries(
     "saveCurrentArtists",
     "artistFavoriteList",
     "artistFavoriteCount",
+    "newArtistInput",
+    "newArtistNickname",
+    "btnAddArtist",
+    "artistSearchInput",
     "presetSummary",
     "presetError",
     "presetEmpty",
@@ -461,6 +467,8 @@ const ui = Object.fromEntries(
 
 // 0.2.0 新增控件按可选处理:旧版 index.html 缺少它们时只隐藏对应功能,不阻断整个界面。
 const OPTIONAL_CONTROLS = new Set([
+  "selectFiltered",
+  "deselectFiltered",
   "detailPrevious",
   "detailNext",
   "detailNavStatus",
@@ -484,6 +492,11 @@ const OPTIONAL_CONTROLS = new Set([
   "variantModes",
   "redrawSections",
   "variantDrawerCount",
+  // 画师管理弹窗手动录入与检索控件:旧版静态缓存缺少时仅隐藏对应入口,不阻断界面。
+  "newArtistInput",
+  "newArtistNickname",
+  "btnAddArtist",
+  "artistSearchInput",
   // 收藏夹常驻新建按钮:旧版 index.html 缺少时仅隐藏新建入口,不阻断界面。
   "btnGalleryAddCollection",
   "btnPresetAddCollection",
@@ -614,6 +627,8 @@ let activeSection = "character";
 let poolPage = 1;
 let poolPages = 1;
 let poolItems = [];
+let poolTotal = 0;
+let poolMatchingIds = [];
 let poolFacets = {};
 let poolRequest = 0;
 let editingCustom = null;
@@ -4217,14 +4232,27 @@ async function loadPool() {
     }
     if (requestId !== poolRequest) return;
     poolItems = data.items || [];
+    poolTotal = Number(data.total) || 0;
+    poolMatchingIds = Array.isArray(data.matching_ids)
+      ? data.matching_ids.map((id) => String(id)).filter(Boolean)
+      : poolItems.map((item) => String(item.id)).filter(Boolean);
     poolFacets = data.facets || {};
     poolPages = data.pages;
     poolPage = data.page;
-    if (activeSection === "pose") poolItems.forEach((item) => poseItemCache.set(item.id, item));
+    if (activeSection === "pose") {
+      poolItems.forEach((item) => poseItemCache.set(item.id, item));
+      if (data.pose_conflicts && typeof data.pose_conflicts === "object") {
+        for (const [id, meta] of Object.entries(data.pose_conflicts)) {
+          if (!poseItemCache.has(id) && meta && typeof meta === "object") {
+            poseItemCache.set(id, meta);
+          }
+        }
+      }
+    }
     ui.poolPageLabel.textContent = `${data.page} / ${data.pages}`;
     ui.poolPrev.disabled = data.page <= 1;
     ui.poolNext.disabled = data.page >= data.pages;
-    ui.poolMeta.textContent = `${data.total} 项可用 · ${selectedCount(activeSection)} 项已选${favoritesAvailable ? "" : " · 收藏离线"}`;
+    updatePoolMetaText();
     renderPoolSidebar();
     renderPoolItems();
     updatePoseConflict();
@@ -4761,7 +4789,57 @@ function renderPoolItems() {
     }),
   );
   ui.poolSelectionLabel.textContent = `已选择 ${selectedCount(activeSection)} 项`;
+  updatePoolMetaText();
   updateFavoriteSelectionButton();
+  updateFilteredActionButtons();
+}
+
+// 统一维护「选中筛选」与「取消筛选」两个批量按钮的文案、计数、禁用态与悬浮提示。
+// 依赖 poolMatchingIds（后端返回的跨页匹配集合）与当前已选状态，可在任意渲染周期安全调用。
+function updateFilteredActionButtons() {
+  const view = currentView();
+  const blockedSet = blockedPromptSets[activeSection] || new Set();
+  const candidates = (Array.isArray(poolMatchingIds) ? poolMatchingIds : [])
+    .map((id) => String(id))
+    .filter((id) => id && !blockedSet.has(id));
+
+  const matchCount = candidates.length;
+  let selectedInMatchCount = 0;
+  for (const id of candidates) {
+    if (selectionHas(activeSection, id)) selectedInMatchCount += 1;
+  }
+  const unselectedInMatchCount = matchCount - selectedInMatchCount;
+
+  if (ui.selectFiltered) {
+    ui.selectFiltered.disabled =
+      Boolean(view.blockedOnly) || Boolean(view.selectedOnly) || unselectedInMatchCount === 0;
+    ui.selectFiltered.textContent = matchCount > 0 ? `选中筛选 · ${matchCount}` : "选中筛选";
+    ui.selectFiltered.title = view.blockedOnly
+      ? "隔离池中的预设已被禁用，无法勾选"
+      : view.selectedOnly
+        ? "当前处于“仅看已选”视图，展示项均已选中"
+        : unselectedInMatchCount > 0
+          ? `将当前筛选出的全部 ${matchCount} 项叠加加入已选（跨页生效）`
+          : matchCount > 0
+            ? `当前筛选出的 ${matchCount} 项均已在选中列表中`
+            : "当前无匹配项可选";
+  }
+
+  if (ui.deselectFiltered) {
+    ui.deselectFiltered.disabled = Boolean(view.blockedOnly) || selectedInMatchCount === 0;
+    ui.deselectFiltered.textContent =
+      selectedInMatchCount > 0 ? `取消筛选 · ${selectedInMatchCount}` : "取消筛选";
+    ui.deselectFiltered.title = view.blockedOnly
+      ? "隔离池中的预设已被禁用，无需取消选择"
+      : selectedInMatchCount > 0
+        ? `从已选中移除当前筛选结果里的 ${selectedInMatchCount} 项（跨页生效）`
+        : "当前筛选结果中没有已选中的项目";
+  }
+}
+
+function updatePoolMetaText() {
+  if (!ui.poolMeta) return;
+  ui.poolMeta.textContent = `${poolTotal} 项可用 · ${selectedCount(activeSection)} 项已选${favoritesAvailable ? "" : " · 收藏离线"}`;
 }
 
 // 切换单个预设的屏蔽状态:加入隔离池时同步从当前已选集合中剔除。
@@ -5248,6 +5326,146 @@ function selectCurrentPage(checked) {
   updatePoseConflict();
   updateFavoriteSelectionButton();
   schedulePersist();
+}
+
+function selectFilteredItems() {
+  const view = currentView();
+  // 守卫 1: 处于隔离屏蔽池或“仅看已选”视图时不执行叠加
+  if (view.blockedOnly) {
+    toast("隔离池中的预设已被禁用，无法勾选");
+    return;
+  }
+  if (view.selectedOnly) {
+    toast("当前处于“仅看已选”视图，筛选结果均已在选中列表中");
+    return;
+  }
+
+  const blockedSet = blockedPromptSets[activeSection] || new Set();
+  // 守卫 2: 过滤空值与任何处于屏蔽池中的条目 ID
+  const candidates = (Array.isArray(poolMatchingIds) ? poolMatchingIds : [])
+    .map((id) => String(id))
+    .filter((id) => id && !blockedSet.has(id));
+
+  if (!candidates.length) {
+    toast("当前筛选条件下没有可勾选的项");
+    return;
+  }
+
+  if (!draft.pools[activeSection]) {
+    draft.pools[activeSection] = { mode: "include", ids: [], excluded_ids: [] };
+  }
+  const selection = draft.pools[activeSection];
+  let newlyAdded = 0;
+
+  if (selection.mode === "all") {
+    // 全选词库模式(mode: "all")下，已被用户手动取消勾选的项保存在 excluded_ids 中；
+    // 叠加选中当前筛选结果，即把匹配项从 excluded_ids 中移除以恢复选中，已选中的保持不变。
+    const candidateSet = new Set(candidates);
+    const beforeLen = selection.excluded_ids.length;
+    selection.excluded_ids = selection.excluded_ids.filter((id) => !candidateSet.has(String(id)));
+    newlyAdded = beforeLen - selection.excluded_ids.length;
+  } else {
+    // 正选模式(mode: "include")下，基于用户已有选择叠加追加，已选中的无视且保持原顺序不变
+    const existingSet = new Set(selection.ids.map((id) => String(id)));
+    for (const id of candidates) {
+      if (!existingSet.has(id)) {
+        selection.ids.push(id);
+        existingSet.add(id);
+        newlyAdded += 1;
+      }
+    }
+  }
+
+  renderPoolItems();
+  renderDimensions();
+  updatePoolOverview();
+  updatePoseConflict();
+  updateFavoriteSelectionButton();
+  schedulePersist();
+
+  if (newlyAdded > 0) {
+    const skippedCount = candidates.length - newlyAdded;
+    toast(
+      skippedCount > 0
+        ? `已叠加选中 ${newlyAdded} 项（其余 ${skippedCount} 项已在选中列表中）`
+        : `已选中当前筛选的全部 ${newlyAdded} 项`,
+    );
+  } else {
+    toast(`当前筛选出的 ${candidates.length} 项均已在选中列表中`);
+  }
+}
+
+// 与 selectFilteredItems 严格对称：把当前筛选结果中「已选中」的跨页条目从已选集合中批量移除。
+async function deselectFilteredItems() {
+  const view = currentView();
+  // 守卫 1: 处于隔离屏蔽池视图时不执行操作
+  if (view.blockedOnly) {
+    toast("隔离池中的预设已被禁用，无需取消选择");
+    return;
+  }
+
+  // 收集当前筛选条件下匹配的全部跨页条目 ID
+  const candidates = (Array.isArray(poolMatchingIds) ? poolMatchingIds : [])
+    .map((id) => String(id))
+    .filter(Boolean);
+
+  if (!candidates.length) {
+    toast("当前筛选条件下没有可取消的项");
+    return;
+  }
+
+  if (!draft.pools[activeSection]) {
+    draft.pools[activeSection] = { mode: "include", ids: [], excluded_ids: [] };
+  }
+  const selection = draft.pools[activeSection];
+  const candidateSet = new Set(candidates);
+  let removedCount = 0;
+
+  if (selection.mode === "all") {
+    // 全选词库模式(mode: "all")下，取消选中当前筛选结果 = 将匹配项并入 excluded_ids 排除列表；
+    // 原本已在 excluded_ids 中的未选项自动跳过。
+    const excludedSet = new Set(selection.excluded_ids.map((id) => String(id)));
+    for (const id of candidates) {
+      if (!excludedSet.has(id)) {
+        selection.excluded_ids.push(id);
+        excludedSet.add(id);
+        removedCount += 1;
+      }
+    }
+  } else {
+    // 正选模式(mode: "include")下，直接从 selection.ids 中剔除命中当前筛选结果的项；
+    // 原本不在 selection.ids 中的未选项自然跳过，其余已选项保持原有顺序不变。
+    const beforeLen = selection.ids.length;
+    selection.ids = selection.ids.filter((id) => !candidateSet.has(String(id)));
+    removedCount = beforeLen - selection.ids.length;
+  }
+
+  if (removedCount === 0) {
+    toast("当前筛选结果中没有已选中的项");
+    updateFilteredActionButtons();
+    return;
+  }
+
+  renderDimensions();
+  updatePoolOverview();
+  updatePoseConflict();
+  updateFavoriteSelectionButton();
+  schedulePersist();
+
+  // 若当前开启了“仅看已选”视图，被取消选中的项目应立即从视图中移除，需重置页码并重新拉取列表
+  if (view.selectedOnly) {
+    poolPage = 1;
+    await loadPool();
+  } else {
+    renderPoolItems();
+  }
+
+  const skippedCount = candidates.length - removedCount;
+  toast(
+    skippedCount > 0
+      ? `已取消选中 ${removedCount} 项（其余 ${skippedCount} 项原本未选中）`
+      : `已取消选中当前筛选的全部 ${removedCount} 项`,
+  );
 }
 
 function openCustom(item = null) {
@@ -7199,11 +7417,15 @@ async function loadArtistFavorites() {
   }
   renderArtistFavorites();
 }
+let artistSearchQuery = "";
+
 function renderArtistFavorites() {
-  const items = (artistFavoritesData.items || []).filter((item) => item.groupIds?.length);
-  ui.artistFavoriteCount.textContent = `${items.length} 位`;
+  const allItems = (artistFavoritesData.items || []).filter((item) => item.groupIds?.length);
+  ui.artistFavoriteCount.textContent = `${allItems.length} 位`;
+
+  // 1. 渲染主面板折叠菜单中的胶囊快捷入口 (仅展示前 12 个)
   ui.artistFavorites.replaceChildren(
-    ...items.slice(0, 12).map((item) => {
+    ...allItems.slice(0, 12).map((item) => {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "artist-chip";
@@ -7213,28 +7435,57 @@ function renderArtistFavorites() {
       return button;
     }),
   );
+
+  // 2. 根据搜索词过滤弹窗内的画师列表
+  const query = (artistSearchQuery || "").trim().toLowerCase();
+  const filteredItems = query
+    ? allItems.filter(
+        (item) =>
+          item.name.toLowerCase().includes(query) ||
+          (item.nickname && item.nickname.toLowerCase().includes(query)),
+      )
+    : allItems;
+
+  // 3. 渲染弹窗内画师列表
+  if (!filteredItems.length) {
+    ui.artistFavoriteList.replaceChildren(
+      Object.assign(document.createElement("div"), {
+        className: "artist-favorite-empty",
+        textContent: query ? "没有找到匹配的画师" : "还没有收藏画师，可在上方直接添加",
+      }),
+    );
+    return;
+  }
+
   ui.artistFavoriteList.replaceChildren(
-    ...(items.length
-      ? items.map((item) => {
-          const row = document.createElement("div");
-          row.className = "artist-favorite-row";
-          row.innerHTML = `<button class="artist-favorite-name" type="button" title="追加到固定画师"><strong>@${escapeHtml(item.name)}</strong>${item.nickname ? `<small>${escapeHtml(item.nickname)}</small>` : ""}</button><button class="button ghost compact" type="button">追加</button><button class="icon-button dark" type="button" title="取消收藏" aria-label="取消收藏">×</button>`;
-          row.children[0].addEventListener("click", () => appendArtist(item.name));
-          row.children[1].addEventListener("click", () => appendArtist(item.name));
-          row.children[2].addEventListener("click", () => removeArtistFavorite(item.name));
-          return row;
-        })
-      : [
-          Object.assign(document.createElement("div"), {
-            className: "artist-favorite-empty",
-            textContent: "还没有收藏画师",
-          }),
-        ]),
+    ...filteredItems.map((item) => {
+      const row = document.createElement("div");
+      row.className = "artist-favorite-row";
+      row.innerHTML = `
+        <button class="artist-favorite-name" type="button" title="点击追加到固定画师">
+          <strong>@${escapeHtml(item.name)}</strong>
+          ${item.nickname ? `<small>${escapeHtml(item.nickname)}</small>` : ""}
+        </button>
+        <button class="button ghost compact btn-append-artist" type="button">追加</button>
+        <button class="icon-button dark btn-remove-artist" type="button" title="取消收藏" aria-label="取消收藏">×</button>
+      `;
+      row.querySelector(".artist-favorite-name").addEventListener("click", () => appendArtist(item.name));
+      row.querySelector(".btn-append-artist").addEventListener("click", () => appendArtist(item.name));
+      row.querySelector(".btn-remove-artist").addEventListener("click", () => removeArtistFavorite(item.name));
+      return row;
+    }),
   );
 }
 async function openArtistDialog() {
+  // 重置输入状态
+  artistSearchQuery = "";
+  if (ui.artistSearchInput) ui.artistSearchInput.value = "";
+  if (ui.newArtistInput) ui.newArtistInput.value = "";
+  if (ui.newArtistNickname) ui.newArtistNickname.value = "";
+
   await loadArtistFavorites();
   ui.artistDialog.showModal();
+  ui.newArtistInput?.focus();
 }
 async function saveCurrentArtistFavorites() {
   const values = artistTokens();
@@ -7252,6 +7503,54 @@ async function saveCurrentArtistFavorites() {
     toast(`已收藏 ${values.length} 位画师`);
   } catch (error) {
     toast(error.message);
+  }
+}
+async function addSingleArtistFavorite() {
+  const nameInput = ui.newArtistInput;
+  const nickInput = ui.newArtistNickname;
+  if (!nameInput) return;
+
+  const rawName = nameInput.value.trim();
+  const cleanName = artistName(rawName); // 自动清洗，去除用户误输入的 @ 或 by 前缀
+  const nickname = nickInput ? nickInput.value.trim() : "";
+
+  if (!cleanName) {
+    toast("请输入有效的画师名");
+    nameInput.focus();
+    return;
+  }
+
+  // 检查是否已在收藏列表中
+  const existing = (artistFavoritesData.items || []).find(
+    (item) => item.name.toLowerCase() === cleanName.toLowerCase() && item.groupIds?.length,
+  );
+  if (existing) {
+    toast(`画师 @${cleanName} 已在收藏列表中`);
+    nameInput.focus();
+    return;
+  }
+
+  try {
+    const payload = {
+      name: cleanName,
+      favorite: true,
+    };
+    if (nickname) payload.nickname = nickname;
+
+    artistFavoritesData = await request("/api/favorites/artist/item", {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    });
+
+    // 成功后清空输入框并聚焦
+    nameInput.value = "";
+    if (nickInput) nickInput.value = "";
+    nameInput.focus();
+
+    renderArtistFavorites();
+    toast(`已收藏画师：@${cleanName}`);
+  } catch (error) {
+    toast(`添加失败: ${error.message}`);
   }
 }
 async function removeArtistFavorite(name) {
@@ -7886,6 +8185,8 @@ ui.poolNext.addEventListener("click", () => {
   loadPool();
 });
 ui.selectPage.addEventListener("click", () => selectCurrentPage(true));
+ui.selectFiltered?.addEventListener("click", selectFilteredItems);
+ui.deselectFiltered?.addEventListener("click", deselectFilteredItems);
 ui.selectAllPool.addEventListener("click", () => {
   const view = currentView();
   if (view.blockedOnly) {
@@ -7942,6 +8243,29 @@ ui.manageArtists.addEventListener("click", openArtistDialog);
 ui.saveCurrentArtists.addEventListener("click", saveCurrentArtistFavorites);
 ui.closeArtists.addEventListener("click", () => ui.artistDialog.close());
 ui.cancelArtists.addEventListener("click", () => ui.artistDialog.close());
+
+// 手动添加画师按钮点击
+ui.btnAddArtist?.addEventListener("click", addSingleArtistFavorite);
+
+// 在画师名或备注输入框中敲击回车直接提交添加
+ui.newArtistInput?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    addSingleArtistFavorite();
+  }
+});
+ui.newArtistNickname?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    addSingleArtistFavorite();
+  }
+});
+
+// 即时搜索监听
+ui.artistSearchInput?.addEventListener("input", (event) => {
+  artistSearchQuery = event.target.value;
+  renderArtistFavorites();
+});
 ui.btnCreatePreset.addEventListener("click", openPresetCreateDialog);
 ui.presetPrevPage?.addEventListener("click", () => {
   if (presetPage > 1) {

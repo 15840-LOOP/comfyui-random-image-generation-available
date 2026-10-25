@@ -1258,7 +1258,7 @@ input:disabled, select:disabled, textarea:disabled { opacity: .5; cursor: not-al
 .compact-check { height: 38px; display: flex; align-items: center; gap: 7px; padding: 0 12px; color: var(--text-secondary); background: var(--surface-muted); border: 1px solid transparent; border-radius: 999px; font-size: 10.5px; white-space: nowrap; transition: background-color .25s ease; }
 .compact-check:has(input:checked) { color: var(--accent); background: var(--accent-soft); }
 .compact-check input { width: 14px; height: 14px; accent-color: var(--accent); box-shadow: none; }
-.pool-actions { display: flex; gap: 7px; padding: 0 24px 12px; }
+.pool-actions { display: flex; flex-wrap: wrap; gap: 7px; padding: 0 24px 12px; }
 .pool-actions .button:last-child { margin-left: auto; }
 .pool-browser { min-height: 0; display: grid; grid-template-columns: 250px minmax(0, 1fr); border-top: 1px solid var(--separator); }
 .pool-sidebar { min-height: 0; overflow: auto; padding: 14px 12px 22px; background: var(--sidebar); border-right: 1px solid var(--separator); scrollbar-width: thin; scrollbar-color: var(--separator-strong) transparent; }
@@ -1389,13 +1389,68 @@ dialog::backdrop { background: rgba(0, 0, 0, .32); backdrop-filter: blur(8px); }
 .import-status { color: var(--success); font-weight: 650; }
 .import-row[data-status="error"] .import-status { color: var(--danger); }
 .import-row[data-status="conflict"] .import-status { color: var(--warning); }
-.artist-favorite-list { display: grid; gap: 6px; max-height: 48vh; overflow-y: auto; overflow-x: hidden; margin-top: 13px; }
-.artist-favorite-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 6px; padding: 9px 10px; background: var(--surface-muted); border: 0; border-radius: 12px; }
+/* ==================== 画师管理弹窗布局与滚动条增强 ==================== */
+.artist-dialog { width: min(560px, calc(100vw - 28px)); }
+.artist-dialog form { display: flex; flex-direction: column; max-height: calc(88vh - 28px); padding: 24px; }
+
+/* 手动新增画师输入行 */
+.artist-add-bar { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) auto; gap: 8px; align-items: center; margin-bottom: 10px; }
+.artist-add-bar input { height: 36px; font-size: 11.5px; }
+.artist-add-bar .button { height: 36px; min-height: 36px; padding: 0 14px; white-space: nowrap; }
+
+/* 工具栏行 (收藏当前输入 + 过滤搜索框) */
+.artist-tools-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--separator); }
+.artist-search-field { flex: 1 1 200px; max-width: 240px; }
+.artist-search-field input { height: 32px; font-size: 11px; }
+.artist-search-field span { top: 5px; font-size: 15px; }
+
+/* 画师列表容器：强制开启物理滚动条并适配主流浏览器 */
+.artist-favorite-list {
+  display: grid;
+  gap: 6px;
+  max-height: 380px;
+  min-height: 120px;
+  overflow-y: scroll; /* 强制显示滚动轨道，防止内容动态加载时由于滚动条显隐导致页面抖动 */
+  overflow-x: hidden;
+  padding-right: 6px; /* 预留滑轨安全距离，避免操作按钮被遮挡 */
+  margin-top: 2px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--separator-strong) transparent;
+}
+
+/* WebKit 浏览器 (Chrome / Edge / Safari) 滚动条自定义拟态高亮 */
+.artist-favorite-list::-webkit-scrollbar { width: 6px; }
+.artist-favorite-list::-webkit-scrollbar-track { background: color-mix(in srgb, var(--surface-muted) 40%, transparent); border-radius: 999px; }
+.artist-favorite-list::-webkit-scrollbar-thumb { background: var(--separator-strong); border-radius: 999px; }
+.artist-favorite-list::-webkit-scrollbar-thumb:hover { background: var(--text-tertiary); }
+
+/* 单条画师项微调 */
+.artist-favorite-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--surface-muted);
+  border: 1px solid transparent;
+  border-radius: 12px;
+  transition: background-color var(--motion-fast) ease, border-color var(--motion-fast) ease;
+}
+.artist-favorite-row:hover { background: var(--surface-pressed); border-color: var(--separator); }
+
 .artist-favorite-name { min-width: 0; display: grid; gap: 2px; overflow: hidden; color: var(--text); text-align: left; background: none; border: 0; }
 .artist-favorite-name strong, .artist-favorite-name small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .artist-favorite-name strong { font-size: 11.5px; }
 .artist-favorite-name small { color: var(--text-tertiary); font-size: 8.5px; }
 .artist-favorite-empty { padding: 24px 8px; color: var(--text-secondary); text-align: center; font-size: 11px; }
+
+/* 画师管理弹窗响应式断点适配 */
+@media (max-width: 620px) {
+  .artist-add-bar { grid-template-columns: 1fr 1fr; }
+  .artist-add-bar .button { grid-column: 1 / -1; width: 100%; }
+  .artist-tools-bar { flex-direction: column; align-items: stretch; }
+  .artist-search-field { max-width: none; }
+}
 .import-child-button { width: 100%; justify-content: center; margin-top: 12px; }
 .child-group-search { display: block; margin-bottom: 10px; }
 .child-group-list { max-height: min(46vh, 410px); overflow-y: auto; overflow-x: hidden; display: grid; gap: 5px; }
@@ -1763,7 +1818,8 @@ html.image-preview-open #detailImage { visibility: hidden; }
   .pool-sidebar-toggle { display: inline-flex; }
   .pool-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); padding-inline: 14px; }
   .pool-actions .button { min-width: 0; width: 100%; padding-inline: 7px; }
-  .pool-actions .button:last-child { grid-column: 1 / -1; margin-left: 0; }
+  .pool-actions .button:last-child { margin-left: 0; }
+  .pool-actions .button:last-child:nth-child(odd) { grid-column: 1 / -1; }
   .favorite-selection-create { grid-template-columns: 1fr; }
   .pool-browser { position: relative; grid-template-columns: minmax(0, 1fr); }
   .pool-sidebar { position: absolute; z-index: 4; inset: 0; padding: 16px 14px 30px; background: var(--chrome-solid); border-right: 0; transform: translateX(-102%); transition: transform .5s var(--spring); }

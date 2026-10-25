@@ -270,6 +270,8 @@
     </div>
     <div class="pool-actions">
       <button id="selectPage" class="button ghost" type="button">选中本页</button>
+      <button id="selectFiltered" class="button ghost" type="button">选中筛选</button>
+      <button id="deselectFiltered" class="button ghost" type="button" disabled>取消筛选</button>
       <button id="selectAllPool" class="button ghost" type="button">全选词库</button>
       <button id="clearPool" class="button ghost" type="button">清空</button>
       <button id="favoriteSelection" class="button ghost" type="button" disabled>收藏本次选择</button>
@@ -342,11 +344,37 @@
 
   <dialog id="artistDialog" class="compact-dialog artist-dialog">
     <form method="dialog">
-      <div class="dialog-heading"><div><span class="kicker">ARTIST FAVORITES</span><h2>收藏画师</h2></div><button id="closeArtists" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button></div>
-      <button id="saveCurrentArtists" class="button primary" type="button">收藏当前输入</button>
-      <p class="import-hint">当前输入会按逗号拆分。点击收藏项可追加到固定画师并自动去重。</p>
+      <div class="dialog-heading">
+        <div>
+          <span class="kicker">ARTIST FAVORITES</span>
+          <h2>收藏画师</h2>
+        </div>
+        <button id="closeArtists" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button>
+      </div>
+
+      <!-- 1. 手动添加画师栏 -->
+      <div class="artist-add-bar">
+        <input id="newArtistInput" type="text" placeholder="画师名 (如 @rella 或 rella)" autocomplete="off" spellcheck="false">
+        <input id="newArtistNickname" type="text" placeholder="备注 (可选，如 常用人像)" autocomplete="off" spellcheck="false">
+        <button id="btnAddArtist" class="button primary compact" type="button">＋ 添加</button>
+      </div>
+
+      <!-- 2. 工具栏：原有的“收藏当前输入”降为次级按钮，右侧补充即时搜索框 -->
+      <div class="artist-tools-bar">
+        <button id="saveCurrentArtists" class="button secondary compact" type="button" title="将主工作台固定画师框中的内容加入收藏">收藏当前输入</button>
+        <label class="search-field artist-search-field">
+          <span aria-hidden="true">⌕</span>
+          <input id="artistSearchInput" type="search" placeholder="搜索已收藏画师...">
+        </label>
+      </div>
+
+      <!-- 3. 画师列表视口容器 (带有独立纵向滚动条) -->
       <div id="artistFavoriteList" class="artist-favorite-list"></div>
-      <div class="dialog-actions"><span></span><span></span><button id="cancelArtists" class="button ghost" type="button">完成</button></div>
+
+      <div class="dialog-actions">
+        <span></span><span></span>
+        <button id="cancelArtists" class="button ghost" type="button">完成</button>
+      </div>
     </form>
   </dialog>
 
@@ -832,6 +860,6 @@
   </div>
 
   <div id="toast" role="status" aria-live="polite"></div>
-  <script src="/static/app.js?v=20261017-preset-batch-mode" defer></script>
+  <script src="/static/app.js?v=20261025-deselect-filtered" defer></script>
 </body>
 </html>

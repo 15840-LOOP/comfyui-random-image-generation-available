@@ -523,5 +523,91 @@ def test_firefly_actual_payload_regression():
     assert costume == ["white shirt", "black jacket", "long sleeves"]
 
 
+def _write_fake_tools(root: Path) -> Path:
+    """构造最小可用的 tools/js 数据集,供独立测试函数复用。"""
+    tools = root / "tools"
+    js = tools / "js"
+    js.mkdir(parents=True, exist_ok=True)
+    datasets = {
+        "character_data.js": [
+            {"name": "alpha", "copyright": "series", "gender": "1girl", "hair": "blue", "eye": "red", "post_count": 20},
+        ],
+        "clothing_data.js": [
+            {"id": "coat", "name": "Coat", "name_zh": "外套", "tags": "red coat", "categories": ["日常/休闲 (Casual & Daily)"], "traits": ["red"]},
+        ],
+        "pose_data.js": [
+            {"id": "stand", "name": "Standing", "name_zh": "站立", "tags": "standing", "categories": ["站立与动态 (Standing & Dynamic)"], "traits": ["standing"]},
+        ],
+        "background_data.js": [
+            {"id": "room", "name": "Room", "name_zh": "房间", "tags": "indoors", "categories": ["都市与日常 (Urban & Daily)"], "traits": ["indoor"]},
+        ],
+    }
+    for filename, values in datasets.items():
+        (js / filename).write_text(f"const data = {json.dumps(values)};\n", encoding="utf-8")
+    return tools
+
+
+def test_search_returns_full_matching_ids_across_pages(tmp_path):
+    """验证分页截断 items 时,matching_ids 依然返回当前筛选条件下的全量跨页 ID。"""
+    from anima_webui.catalog import PromptCatalog
+
+    catalog = PromptCatalog(tmp_path, _write_fake_tools(tmp_path))
+    # expression 池含内置 EXPRESSION_DATA,用唯一关键词把自定义项与内置项隔离开。
+    catalog.set_custom_items(
+        [
+            {
+                "id": f"custom:expression-{i}",
+                "section": "expression",
+                "title": f"Expression {i}",
+                "prompt": "zzunique",
+                "categories": ["Facial Expression"],
+                "traits": ["zzunique"],
+            }
+            for i in range(16)
+        ]
+    )
+    res = catalog.search("expression", query="zzunique", page=1, limit=5)
+    assert len(res["items"]) == 5
+    assert res["total"] == 16
+    assert len(res["matching_ids"]) == 16
+    assert [item["id"] for item in res["items"]] == res["matching_ids"][:5]
+
+
+def test_search_matching_ids_excludes_blocked_and_includes_pose_conflicts(tmp_path):
+    """验证 matching_ids 自动排除屏蔽项,且 pose 池返回跨页冲突槽位元数据。"""
+    from anima_webui.catalog import PromptCatalog
+
+    catalog = PromptCatalog(tmp_path, _write_fake_tools(tmp_path))
+    # pose 池含内置 pose_data.js 条目,用唯一关键词把自定义项与内置项隔离开。
+    catalog.set_custom_items(
+        [
+            {
+                "id": f"custom:pose-{i}",
+                "section": "pose",
+                "title": f"Pose {i}",
+                "prompt": "zzunique, salute",
+                "categories": ["Standing & Dynamic"],
+                "traits": ["zzunique", "salute"],
+            }
+            for i in range(60)
+        ]
+    )
+    res = catalog.search(
+        "pose",
+        query="zzunique",
+        page=1,
+        limit=48,
+        blocked_ids={"custom:pose-0", "custom:pose-55"},
+    )
+    assert res["total"] == 58
+    assert len(res["items"]) == 48
+    assert len(res["matching_ids"]) == 58
+    assert "custom:pose-0" not in res["matching_ids"]
+    assert "custom:pose-55" not in res["matching_ids"]
+    # 第 2 页的 custom:pose-59 也必须在 pose_conflicts 映射中返回,供前端跨页冲突检测预热
+    assert "custom:pose-59" in res["pose_conflicts"]
+    assert "body_pose" in res["pose_conflicts"]["custom:pose-59"]["conflict_slots"]
+
+
 if __name__ == "__main__":
     unittest.main()

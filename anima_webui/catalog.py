@@ -565,8 +565,24 @@ class PromptCatalog:
         pages = max(1, (total + limit - 1) // limit)
         page = min(page, pages)
         offset = (page - 1) * limit
+        matching_ids = [str(item["id"]) for item in entries if item.get("id")]
+        pose_conflicts = (
+            {
+                str(item["id"]): {
+                    "id": str(item["id"]),
+                    "title": str(item.get("title") or item.get("id") or ""),
+                    "conflict_slots": list(item.get("conflict_slots") or []),
+                }
+                for item in entries
+                if item.get("id") and item.get("conflict_slots")
+            }
+            if section == "pose"
+            else {}
+        )
         return {
             "items": [self.public_item(item) for item in entries[offset : offset + limit]],
+            "matching_ids": matching_ids,
+            "pose_conflicts": pose_conflicts,
             "page": page,
             "pages": pages,
             "limit": limit,
