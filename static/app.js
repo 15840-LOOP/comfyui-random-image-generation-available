@@ -1157,6 +1157,7 @@ function applySettings(raw) {
   if (loraInventoryLoaded) reconcileLoraTriggers(draft.loras.filter((item) => item.enabled));
   renderDimensions();
   renderLoras();
+  renderLoraCatalog();
   updatePeopleTotal();
   updatePoolOverview();
   updateRepairControls();
@@ -1632,6 +1633,7 @@ function renderLoraCatalog() {
 }
 async function openLoraDialog() {
   ui.loraSearch.value = "";
+  renderLoraCatalog();
   ui.loraDialog.showModal();
   await loadLoraInventory();
   renderLoraCatalog();
@@ -8445,6 +8447,7 @@ ui.resetLoras.addEventListener("click", () => {
   draft.loras = clone(defaults?.loras || []);
   reconcileLoraTriggers(draft.loras.filter((item) => item.enabled));
   renderLoras();
+  renderLoraCatalog();
   schedulePersist();
   toast("已恢复模板默认 LoRA");
 });
