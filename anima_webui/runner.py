@@ -57,10 +57,12 @@ class BatchManager:
         catalog: PromptCatalog | None = None,
         prompt_rules: PromptRuleStore | None = None,
         blocked_prompts: BlockedPromptStore | None = None,
+        lora_auxiliary_words: Any | None = None,
     ):
         self.templates = templates
         self.history = history
         self.comfy = comfy
+        self.lora_auxiliary_words = lora_auxiliary_words
         self.task: asyncio.Task[None] | None = None
         self.state: dict[str, Any] | None = None
         self.stop_requested = False
@@ -229,6 +231,10 @@ class BatchManager:
             if not lora_filenames:
                 raise ComfyError("ComfyUI 客户端无法读取 LoRA 列表")
             settings["loras"] = validate_loras(settings, await lora_filenames())
+            if self.lora_auxiliary_words is not None:
+                for item in settings["loras"]:
+                    if item.get("auxiliary_enabled") and "auxiliary_words" not in item:
+                        item["auxiliary_words"] = self.lora_auxiliary_words.get(item["filename"])
             resource_inventory = getattr(self.comfy, "resource_inventory", None)
             if resource_inventory:
                 resources = await resource_inventory()

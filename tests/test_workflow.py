@@ -687,5 +687,56 @@ class TemplateValidationTests(unittest.TestCase):
             WorkflowTemplates(api, broken_ui)
 
 
+
+
+def test_lora_auxiliary_words_merge_into_extra_prompt():
+    template_dir = APP_DIR / "templates"
+    templates = WorkflowTemplates.load(template_dir)
+    settings = {
+        **DEFAULT_SETTINGS,
+        "extra_prompt": "cinematic lighting",
+        "loras": [
+            {
+                "filename": "style_a.safetensors",
+                "enabled": True,
+                "strength": 0.8,
+                "auxiliary_enabled": True,
+                "auxiliary_words": ["vibrant colors", "detailed background"],
+            },
+            {
+                "filename": "style_b.safetensors",
+                "enabled": True,
+                "strength": 0.5,
+                "auxiliary_enabled": False,
+                "auxiliary_words": ["monochrome", "sketch"],
+            },
+            {
+                "filename": "style_c.safetensors",
+                "enabled": False,
+                "strength": 1.0,
+                "auxiliary_enabled": True,
+                "auxiliary_words": ["should not appear"],
+            },
+        ],
+    }
+    validated = validate_settings(settings)
+    assert validated["loras"][0]["auxiliary_enabled"] is True
+    assert validated["loras"][1]["auxiliary_enabled"] is False
+
+    submission = templates.submission(
+        validated,
+        sample_seed=123,
+        prompt_seed=456,
+        filename_prefix="test",
+        client_id="cid",
+        sequence=1,
+    )
+    node_42_extra = submission["prompt"]["42"]["inputs"]["extra_prompt"]
+    assert "cinematic lighting" in node_42_extra
+    assert "vibrant colors" in node_42_extra
+    assert "detailed background" in node_42_extra
+    assert "monochrome" not in node_42_extra
+    assert "should not appear" not in node_42_extra
+
 if __name__ == "__main__":
     unittest.main()

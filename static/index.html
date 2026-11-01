@@ -490,6 +490,16 @@
     </form>
   </dialog>
 
+  <dialog id="loraAuxiliaryDialog" class="compact-dialog lora-auxiliary-dialog">
+    <form id="loraAuxiliaryForm" method="dialog">
+      <div class="dialog-heading"><div><span class="kicker">LORA AUXILIARY</span><h2 id="loraAuxiliaryTitle">编辑辅助词</h2></div><button id="closeLoraAuxiliary" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button></div>
+      <input id="loraAuxiliaryFilename" type="hidden">
+      <label class="field"><span>辅助词</span><textarea id="loraAuxiliaryWords" rows="6" maxlength="20000" placeholder="每行或逗号分隔；输入帮助更好呈现 LoRA 效果的辅助词（非触发词）"></textarea></label>
+      <p class="import-hint">辅助词用于更好呈现 LoRA 效果。可在工作台 LoRA 列表中手动勾选启用，生图时将与额外提示词合并输入 ComfyUI 后台。</p>
+      <div class="dialog-actions"><button id="resetLoraAuxiliary" class="button ghost" type="button">清空辅助词</button><span></span><button id="cancelLoraAuxiliary" class="button ghost" type="button">取消</button><button class="button primary" type="submit">保存</button></div>
+    </form>
+  </dialog>
+
   <dialog id="promptRuleDialog" class="prompt-rule-dialog">
     <form id="promptRuleForm" method="dialog">
       <div class="dialog-heading"><div><span class="kicker">ANIMA TAG RULES</span><h2>规范与替换规则</h2></div><button id="closePromptRules" class="icon-button dark" type="button" title="关闭" aria-label="关闭">×</button></div>

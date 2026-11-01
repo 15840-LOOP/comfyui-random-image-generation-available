@@ -186,6 +186,14 @@ const ui = Object.fromEntries(
     "closeLoraTriggers",
     "cancelLoraTriggers",
     "resetLoraTriggers",
+    "loraAuxiliaryDialog",
+    "loraAuxiliaryForm",
+    "loraAuxiliaryTitle",
+    "loraAuxiliaryFilename",
+    "loraAuxiliaryWords",
+    "closeLoraAuxiliary",
+    "cancelLoraAuxiliary",
+    "resetLoraAuxiliary",
     "managePromptRules",
     "undoPromptNormalization",
     "promptNormalizationStatus",
@@ -638,6 +646,7 @@ let loraInventory = [];
 let loraInventoryLoaded = false;
 let loraInventoryError = "";
 let editingLoraTrigger = null;
+let editingLoraAuxiliary = null;
 let promptRules = [];
 let editingPromptRule = null;
 let normalizationUndo = null;
@@ -1191,7 +1200,13 @@ function readSettings() {
       denoise: Number(ui.second_sampler_denoise.value),
     },
     pools: clone(draft.pools),
-    loras: clone(draft.loras),
+    loras: clone(draft.loras).map((item) => {
+      const inv = loraItem(item.filename);
+      return {
+        ...item,
+        auxiliary_words: inv?.auxiliary_words || item.auxiliary_words || [],
+      };
+    }),
     lora_managed_triggers: clone(draft.managedTriggers || []),
     model_name: ui.model_name.value,
     hires: {
@@ -1495,6 +1510,7 @@ function renderLoras() {
       const display = loraPresentation(inventoryItem, item.filename);
       const triggers = normalizeTriggerWords(inventoryItem?.trigger_words || []);
       const triggerLabel = inventoryItem?.trigger_override ? "触发词（已覆盖）" : "触发词";
+      const auxWords = normalizeTriggerWords(inventoryItem?.auxiliary_words || []);
       const isSingleItem = loras.length <= 1;
 
       // 双层分工结构：第一行展示核心名称与开关/删除；第二行展示标签、触发词、权重与排序
@@ -1510,9 +1526,15 @@ function renderLoras() {
           <div class="lora-tags">
             <small class="${available && !high ? "" : "lora-warning"}">${available ? (high ? "高强度 · 模型 + CLIP" : "模型 + CLIP") : "文件不存在"}</small>
             ${triggers.length || inventoryItem?.trigger_override ? `<small class="lora-trigger-line" title="自动触发词">${triggerLabel}：${triggers.length ? escapeHtml(triggers.join(", ")) : "已禁用"}</small>` : ""}
+            ${auxWords.length ? `<small class="lora-aux-line" title="辅助词">辅助词：${escapeHtml(auxWords.join(", "))}</small>` : ""}
           </div>
           <div class="lora-actions">
+            <label class="lora-aux-toggle-wrap" title="生图时是否将该 LoRA 辅助词合并到额外提示词中">
+              <input class="lora-aux-toggle" type="checkbox" ${item.auxiliary_enabled ? "checked" : ""}>
+              <span>辅助词</span>
+            </label>
             <button class="button ghost compact lora-trigger-edit" type="button" data-lora-triggers ${inventoryItem ? "" : "disabled"}>触发词</button>
+            <button class="button ghost compact lora-aux-edit" type="button" data-lora-aux ${inventoryItem ? "" : "disabled"}>辅助词</button>
             <input class="lora-strength" type="number" min="-100" max="100" step="0.05" value="${Number(item.strength)}" title="LoRA 权重" aria-label="${escapeHtml(item.filename)} 强度">
             <div class="lora-order-group" ${isSingleItem ? "hidden" : ""}>
               <button class="icon-button dark" type="button" data-lora-up title="上移" aria-label="上移">↑</button>
@@ -1528,6 +1550,14 @@ function renderLoras() {
         renderLoras();
         schedulePersist();
       });
+
+      row.querySelector(".lora-aux-toggle")?.addEventListener("change", (event) => {
+        item.auxiliary_enabled = event.target.checked;
+        renderLoras();
+        schedulePersist();
+      });
+
+      row.querySelector("[data-lora-aux]")?.addEventListener("click", () => openLoraAuxiliaryDialog(item));
 
       row.querySelector(".lora-strength")?.addEventListener("change", (event) => {
         const value = Number(event.target.value);
@@ -1606,27 +1636,35 @@ function renderLoraCatalog() {
     ...items.map((item) => {
       const configuredItem = configured.has(normalizedPath(item.filename));
       const display = loraPresentation(item, item.filename);
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "lora-catalog-item";
-      button.disabled = configuredItem;
+      const card = document.createElement("div");
+      card.className = `lora-catalog-item${configuredItem ? " configured" : ""}`;
       const triggers = normalizeTriggerWords(item.trigger_words || []);
+      const auxWords = normalizeTriggerWords(item.auxiliary_words || []);
       const preview = item.preview
         ? `<img loading="lazy" decoding="async" src="${escapeHtml(item.preview)}" alt="" data-lora-preview>`
         : "";
-      button.innerHTML = `<span class="lora-catalog-preview">${preview}<span class="lora-preview-placeholder" aria-hidden="true">LoRA</span></span><span class="lora-catalog-copy"><strong title="${escapeHtml(item.display_name || display.path)}">${escapeHtml(item.display_name || display.basename)}</strong><small title="${escapeHtml(display.path)}">${escapeHtml(display.folder)} / ${escapeHtml(display.basename)}${configuredItem ? " · 已配置" : ""}</small><span class="lora-catalog-triggers">${item.trigger_override ? "已覆盖 · " : ""}${triggers.length ? `触发词：${escapeHtml(triggers.join(", "))}` : item.trigger_override ? "已禁用触发词" : "无触发词"}</span></span><span class="lora-catalog-add" aria-hidden="true">${configuredItem ? "✓" : "+"}</span>`;
-      button.querySelector("[data-lora-preview]")?.addEventListener("error", (event) => {
+      card.innerHTML = `<span class="lora-catalog-preview">${preview}<span class="lora-preview-placeholder" aria-hidden="true">LoRA</span></span><span class="lora-catalog-copy"><strong title="${escapeHtml(item.display_name || display.path)}">${escapeHtml(item.display_name || display.basename)}</strong><small title="${escapeHtml(display.path)}">${escapeHtml(display.folder)} / ${escapeHtml(display.basename)}${configuredItem ? " · 已加入工作台" : ""}</small><span class="lora-catalog-triggers" title="${triggers.length ? escapeHtml(triggers.join(', ')) : ''}">${item.trigger_override ? "已覆盖 · " : ""}${triggers.length ? `触发词：${escapeHtml(triggers.join(", "))}` : item.trigger_override ? "已禁用触发词" : "无触发词"}</span>${auxWords.length ? `<span class="lora-catalog-aux-words" title="${escapeHtml(auxWords.join(', '))}">辅助词：${escapeHtml(auxWords.join(", "))}</span>` : ""}<div class="lora-catalog-actions"><button class="button ghost compact lora-catalog-trigger-btn" type="button" title="设置该 LoRA 的默认触发词">设置触发词</button><button class="button ghost compact lora-catalog-aux-btn" type="button" title="设置该 LoRA 的辅助词">辅助词</button></div></span><span class="lora-catalog-add" title="${configuredItem ? '已在工作台中' : '添加至工作台'}" aria-hidden="true">${configuredItem ? "✓" : "+"}</span>`;
+      card.querySelector("[data-lora-preview]")?.addEventListener("error", (event) => {
         event.currentTarget.remove();
       });
-      button.addEventListener("click", () => {
-        const lora = { filename: item.filename, enabled: true, strength: 1 };
+      card.querySelector(".lora-catalog-trigger-btn")?.addEventListener("click", (event) => {
+        event.stopPropagation();
+        openLoraTriggerDialog(item);
+      });
+      card.querySelector(".lora-catalog-aux-btn")?.addEventListener("click", (event) => {
+        event.stopPropagation();
+        openLoraAuxiliaryDialog(item);
+      });
+      card.addEventListener("click", () => {
+        if (configuredItem) return;
+        const lora = { filename: item.filename, enabled: true, strength: 1, auxiliary_enabled: false };
         draft.loras.push(lora);
         reconcileLoraTriggers([lora]);
         renderLoras();
         renderLoraCatalog();
         schedulePersist();
       });
-      return button;
+      return card;
     }),
   );
   ui.loraCatalogMeta.textContent = loraInventoryError || `${loraInventory.length} 个本地 LoRA`;
@@ -1653,11 +1691,14 @@ function replaceLoraInventoryItem(value) {
   if (index >= 0) loraInventory[index] = value;
   else loraInventory.push(value);
 }
-function openLoraTriggerDialog(configuredItem) {
-  const inventoryItem = loraItem(configuredItem.filename);
+function openLoraTriggerDialog(targetItem) {
+  if (!targetItem) return;
+  const filename = targetItem.filename || targetItem;
+  const inventoryItem = loraItem(filename) || (typeof targetItem === "object" ? targetItem : null);
   if (!inventoryItem) return;
-  editingLoraTrigger = configuredItem;
-  const display = loraPresentation(inventoryItem, configuredItem.filename);
+  const configuredItem = draft.loras.find((item) => normalizedPath(item.filename) === normalizedPath(inventoryItem.filename));
+  editingLoraTrigger = configuredItem || { filename: inventoryItem.filename, enabled: false };
+  const display = loraPresentation(inventoryItem, inventoryItem.filename);
   ui.loraTriggerTitle.textContent = `编辑 ${inventoryItem.display_name || display.basename}`;
   ui.loraTriggerFilename.value = inventoryItem.filename;
   ui.loraTriggerWords.value = normalizeTriggerWords(inventoryItem.trigger_words || []).join("\n");
@@ -1678,7 +1719,10 @@ async function saveLoraTriggers(event) {
       }),
     });
     replaceLoraInventoryItem(value);
-    reconcileLoraTriggers(editingLoraTrigger.enabled ? [editingLoraTrigger] : []);
+    const configuredItem = draft.loras.find((item) => normalizedPath(item.filename) === normalizedPath(value.filename));
+    if (configuredItem && configuredItem.enabled) {
+      reconcileLoraTriggers([configuredItem]);
+    }
     renderLoras();
     renderLoraCatalog();
     schedulePersist();
@@ -1694,12 +1738,67 @@ async function resetLoraTriggers() {
     const filename = encodeURIComponent(ui.loraTriggerFilename.value);
     const value = await request(`/api/loras/triggers?filename=${filename}`, { method: "DELETE" });
     replaceLoraInventoryItem(value);
-    reconcileLoraTriggers(editingLoraTrigger.enabled ? [editingLoraTrigger] : []);
+    const configuredItem = draft.loras.find((item) => normalizedPath(item.filename) === normalizedPath(value.filename));
+    if (configuredItem && configuredItem.enabled) {
+      reconcileLoraTriggers([configuredItem]);
+    }
     renderLoras();
     renderLoraCatalog();
     schedulePersist();
     ui.loraTriggerDialog.close();
-    toast("已恢复 LoRA Manager 原始触发词");
+    toast("已恢复原始默认触发词");
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+function openLoraAuxiliaryDialog(targetItem) {
+  if (!targetItem) return;
+  const filename = targetItem.filename || targetItem;
+  const inventoryItem = loraItem(filename) || (typeof targetItem === "object" ? targetItem : null);
+  if (!inventoryItem) return;
+  const configuredItem = draft.loras.find((item) => normalizedPath(item.filename) === normalizedPath(inventoryItem.filename));
+  editingLoraAuxiliary = configuredItem || { filename: inventoryItem.filename, enabled: false };
+  const display = loraPresentation(inventoryItem, inventoryItem.filename);
+  ui.loraAuxiliaryTitle.textContent = `编辑 ${inventoryItem.display_name || display.basename} 辅助词`;
+  ui.loraAuxiliaryFilename.value = inventoryItem.filename;
+  ui.loraAuxiliaryWords.value = normalizeTriggerWords(inventoryItem.auxiliary_words || []).join("\n");
+  ui.loraAuxiliaryDialog.showModal();
+}
+
+async function saveLoraAuxiliary(event) {
+  event.preventDefault();
+  if (!editingLoraAuxiliary) return;
+  try {
+    const value = await request("/api/loras/auxiliary", {
+      method: "PUT",
+      body: JSON.stringify({
+        filename: ui.loraAuxiliaryFilename.value,
+        auxiliaryWords: parseLoraTriggerInput(ui.loraAuxiliaryWords.value),
+      }),
+    });
+    replaceLoraInventoryItem(value);
+    renderLoras();
+    renderLoraCatalog();
+    schedulePersist();
+    ui.loraAuxiliaryDialog.close();
+    toast(value.auxiliary_words?.length ? "LoRA 辅助词已保存" : "已清空辅助词");
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+async function resetLoraAuxiliary() {
+  if (!editingLoraAuxiliary) return;
+  try {
+    const filename = encodeURIComponent(ui.loraAuxiliaryFilename.value);
+    const value = await request(`/api/loras/auxiliary?filename=${filename}`, { method: "DELETE" });
+    replaceLoraInventoryItem(value);
+    renderLoras();
+    renderLoraCatalog();
+    schedulePersist();
+    ui.loraAuxiliaryDialog.close();
+    toast("已清空辅助词");
   } catch (error) {
     toast(error.message);
   }
@@ -8457,6 +8556,10 @@ ui.loraTriggerForm.addEventListener("submit", saveLoraTriggers);
 ui.resetLoraTriggers.addEventListener("click", resetLoraTriggers);
 ui.closeLoraTriggers.addEventListener("click", () => ui.loraTriggerDialog.close());
 ui.cancelLoraTriggers.addEventListener("click", () => ui.loraTriggerDialog.close());
+ui.loraAuxiliaryForm?.addEventListener("submit", saveLoraAuxiliary);
+ui.resetLoraAuxiliary?.addEventListener("click", resetLoraAuxiliary);
+ui.closeLoraAuxiliary?.addEventListener("click", () => ui.loraAuxiliaryDialog.close());
+ui.cancelLoraAuxiliary?.addEventListener("click", () => ui.loraAuxiliaryDialog.close());
 ui.loraSearch.addEventListener("input", () => {
   clearTimeout(ui.loraSearch._timer);
   ui.loraSearch._timer = setTimeout(renderLoraCatalog, 220);

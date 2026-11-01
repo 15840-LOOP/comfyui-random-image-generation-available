@@ -288,6 +288,40 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reset_payload["trigger_words"], ["@One", "Second"])
         self.assertFalse(reset_payload["trigger_override"])
 
+    async def test_lora_auxiliary_words_can_be_edited_and_reset(self):
+        self.comfy.preview_items = [
+            {
+                "filename": "风格/one.safetensors",
+                "display_name": "One",
+                "preview": "",
+                "trigger_words": ["@One"],
+                "trigger_metadata_available": True,
+            }
+        ]
+        listing = await (await self.client.get("/api/loras")).json()
+        self.assertEqual(listing["items"][0]["auxiliary_words"], [])
+
+        updated = await self.client.put(
+            "/api/loras/auxiliary",
+            json={"filename": "风格/one.safetensors", "auxiliaryWords": [" dynamic angle ", "high contrast"]},
+        )
+        self.assertEqual(updated.status, 200)
+        payload = await updated.json()
+        self.assertEqual(payload["auxiliary_words"], ["dynamic angle", "high contrast"])
+
+        listing2 = await (await self.client.get("/api/loras")).json()
+        self.assertEqual(listing2["items"][0]["auxiliary_words"], ["dynamic angle", "high contrast"])
+
+        reset = await self.client.delete(
+            "/api/loras/auxiliary?filename=%E9%A3%8E%E6%A0%BC%2Fone.safetensors"
+        )
+        self.assertEqual(reset.status, 200)
+        reset_payload = await reset.json()
+        self.assertEqual(reset_payload["auxiliary_words"], [])
+
+        listing3 = await (await self.client.get("/api/loras")).json()
+        self.assertEqual(listing3["items"][0]["auxiliary_words"], [])
+
     async def test_prompt_normalization_and_rule_crud(self):
         normalized = await self.client.post(
             "/api/prompts/normalize",

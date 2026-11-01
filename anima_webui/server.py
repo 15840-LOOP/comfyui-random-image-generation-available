@@ -23,6 +23,7 @@ from .catalog import CatalogError, PromptCatalog, SECTIONS, resolve_output_dir
 from .custom_prompts import CustomPromptStore
 from .favorites import FavoritesService, favorite_key
 from .history import CollectionError, HistoryStore
+from .lora_auxiliary import LoraAuxiliaryStore
 from .lora_triggers import LoraTriggerOverrideStore
 from .persistence import load_app_settings, save_app_settings
 from .prompt_rules import PromptRuleStore
@@ -216,6 +217,7 @@ def create_app(
     custom_prompts_path: str | Path | None = None,
     style_presets_path: str | Path | None = None,
     lora_trigger_overrides_path: str | Path | None = None,
+    lora_auxiliary_words_path: str | Path | None = None,
     prompt_replacements_path: str | Path | None = None,
     blocked_prompts_path: str | Path | None = None,
     anima_tools_dir: str | Path | None = None,
@@ -241,6 +243,9 @@ def create_app(
     lora_trigger_overrides = LoraTriggerOverrideStore(
         lora_trigger_overrides_path or storage / "lora_trigger_overrides.json"
     )
+    lora_auxiliary_words = LoraAuxiliaryStore(
+        lora_auxiliary_words_path or storage / "lora_auxiliary_words.json"
+    )
     style_presets = StylePresetStore(
         style_presets_path or storage / "style_presets.json", prompt_rules
     )
@@ -250,7 +255,7 @@ def create_app(
     templates = WorkflowTemplates.load(root / "templates")
     startup_defaults = configure_resources(templates, resource_paths)
     manager = BatchManager(
-        templates, history, client, catalog, prompt_rules, blocked_prompts
+        templates, history, client, catalog, prompt_rules, blocked_prompts, lora_auxiliary_words
     )
 
     startup_warnings = [
@@ -258,6 +263,7 @@ def create_app(
         *custom_prompts.load_warnings,
         *style_presets.load_warnings,
         *lora_trigger_overrides.load_warnings,
+        *lora_auxiliary_words.load_warnings,
         *prompt_rules.load_warnings,
         *blocked_prompts.load_warnings,
     ]
@@ -566,16 +572,49 @@ def create_app(
             raise WorkflowError("filename 不能为空")
         from .workflow import normalize_lora_path
 
-        identity = normalize_lora_path(target).casefold()
-        inventory = await client.lora_inventory()
+        norm_filename = normalize_lora_path(target)
+        identity = norm_filename.casefold()
+        inventory: dict[str, Any] = {}
+        try:
+            inventory = await client.lora_inventory()
+        except Exception:
+            inventory = {"items": []}
+
+        items = inventory.get("items") or []
         matches = [
             item
-            for item in inventory.get("items") or []
+            for item in items
             if normalize_lora_path(item.get("filename")).casefold() == identity
         ]
-        if len(matches) != 1:
-            raise WorkflowError(f"LoRA 文件不存在: {target}")
-        return matches[0], normalize_lora_path(matches[0]["filename"])
+        if len(matches) == 1:
+            return matches[0], normalize_lora_path(matches[0]["filename"])
+        if len(matches) > 1:
+            return matches[0], norm_filename
+
+        basename = norm_filename.rsplit("/", 1)[-1].casefold()
+        base_matches = [
+            item
+            for item in items
+            if normalize_lora_path(item.get("filename")).rsplit("/", 1)[-1].casefold() == basename
+        ]
+        if len(base_matches) == 1:
+            return base_matches[0], normalize_lora_path(base_matches[0]["filename"])
+
+        fallback_item = {
+            "filename": norm_filename,
+            "normalized_path": norm_filename,
+            "folder": norm_filename.rsplit("/", 1)[0] if "/" in norm_filename else "",
+            "basename": norm_filename.rsplit("/", 1)[-1],
+            "display_name": norm_filename.rsplit("/", 1)[-1].rsplit(".", 1)[0],
+            "preview": "",
+            "has_preview": False,
+            "preview_nsfw_level": 0,
+            "trigger_words": [],
+            "trigger_metadata_available": False,
+            "metadata_source": "manual",
+            "size": None,
+        }
+        return fallback_item, norm_filename
 
     def _public_lora_item(item: dict[str, Any]) -> dict[str, Any]:
         value = dict(item)
@@ -588,6 +627,7 @@ def create_app(
         value["trigger_override"] = overridden
         if overridden:
             value["trigger_metadata_available"] = True
+        value["auxiliary_words"] = lora_auxiliary_words.get(value["filename"])
         preview = str(value.get("preview") or "")
         value["preview"] = (
             f"/api/loras/preview?{urlencode({'filename': value['filename']})}"
@@ -618,6 +658,19 @@ def create_app(
     async def reset_lora_triggers(request: web.Request) -> web.Response:
         item, filename = await _lora_inventory_item(request.query.get("filename"))
         await lora_trigger_overrides.delete(filename)
+        return web.json_response(_public_lora_item({**item, "filename": filename}))
+
+    async def update_lora_auxiliary(request: web.Request) -> web.Response:
+        body = await _json_body(request)
+        item, filename = await _lora_inventory_item(body.get("filename"))
+        words = await lora_auxiliary_words.set(filename, body.get("auxiliaryWords"))
+        value = _public_lora_item({**item, "filename": filename})
+        value["auxiliary_words"] = words
+        return web.json_response(value)
+
+    async def reset_lora_auxiliary(request: web.Request) -> web.Response:
+        item, filename = await _lora_inventory_item(request.query.get("filename"))
+        await lora_auxiliary_words.delete(filename)
         return web.json_response(_public_lora_item({**item, "filename": filename}))
 
     async def lora_preview(request: web.Request) -> web.Response:
@@ -1528,6 +1581,8 @@ def create_app(
     app.router.add_get("/api/loras/preview", lora_preview)
     app.router.add_put("/api/loras/triggers", update_lora_triggers)
     app.router.add_delete("/api/loras/triggers", reset_lora_triggers)
+    app.router.add_put("/api/loras/auxiliary", update_lora_auxiliary)
+    app.router.add_delete("/api/loras/auxiliary", reset_lora_auxiliary)
     app.router.add_get("/api/resources", resources)
     app.router.add_get("/api/style-presets", list_style_presets)
     app.router.add_post("/api/style-presets", create_style_preset)

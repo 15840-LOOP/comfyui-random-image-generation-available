@@ -308,7 +308,28 @@ def _normalize_loras(value: Any) -> list[dict[str, Any]]:
             raise WorkflowError(
                 f"loras[{index}].strength 必须在 {MIN_LORA_STRENGTH:g}-{MAX_LORA_STRENGTH:g} 之间"
             )
-        result.append({"filename": filename, "enabled": enabled, "strength": strength})
+        auxiliary_enabled = _boolean(
+            f"loras[{index}].auxiliary_enabled", item.get("auxiliary_enabled", False)
+        )
+        entry: dict[str, Any] = {
+            "filename": filename,
+            "enabled": enabled,
+            "strength": strength,
+            "auxiliary_enabled": auxiliary_enabled,
+        }
+        if "auxiliary_words" in item:
+            raw_aux = item.get("auxiliary_words")
+            if not isinstance(raw_aux, list):
+                raise WorkflowError(f"loras[{index}].auxiliary_words 必须是数组")
+            norm_aux: list[str] = []
+            for w_idx, w in enumerate(raw_aux):
+                if not isinstance(w, str):
+                    raise WorkflowError(f"loras[{index}].auxiliary_words[{w_idx}] 必须是字符串")
+                clean_w = w.strip()
+                if clean_w:
+                    norm_aux.append(clean_w)
+            entry["auxiliary_words"] = norm_aux
+        result.append(entry)
     return result
 
 
@@ -1155,6 +1176,21 @@ def render_workflows(
 
     # 4. 统一注入 Node 42：断开 Node 60 连线，extra_prompt 直接接收字符串
     extra_prompt_text = settings.get("extra_prompt", "").strip()
+    aux_tokens: list[str] = []
+    seen_aux: set[str] = set()
+    for lora_cfg in settings.get("loras", []):
+        if lora_cfg.get("enabled") and lora_cfg.get("auxiliary_enabled"):
+            for w in lora_cfg.get("auxiliary_words", []):
+                clean_w = str(w).strip()
+                ident = clean_w.casefold()
+                if clean_w and ident not in seen_aux:
+                    seen_aux.add(ident)
+                    aux_tokens.append(clean_w)
+    if aux_tokens:
+        aux_text = ", ".join(aux_tokens)
+        combined_extra = f"{extra_prompt_text}, {aux_text}" if extra_prompt_text else aux_text
+    else:
+        combined_extra = extra_prompt_text
     positive["character_tags"] = "" if injected_full_prompt else combined_character
     positive["clothing_tags"] = (
         "" if injected_full_prompt
@@ -1165,7 +1201,7 @@ def render_workflows(
         else (get_resolved_tags("pose") if settings["random_pose"] else settings["fixed_pose"])
     )
     positive["background_tags"] = "" if injected_full_prompt else bg_tags
-    positive["extra_prompt"] = injected_full_prompt if injected_full_prompt else extra_prompt_text
+    positive["extra_prompt"] = injected_full_prompt if injected_full_prompt else combined_extra
 
     # 换装时的原设服装负向压制:把被剥离的 costume_tags 追加到负面提示词,
     # 避免"新服装 + 原设服装"双层叠加导致画面撕裂。

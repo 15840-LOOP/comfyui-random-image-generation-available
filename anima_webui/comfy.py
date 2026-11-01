@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from collections.abc import AsyncIterator, Callable
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode, urlparse
 
 import aiohttp
 
+from .lora_triggers import extract_safetensors_triggers
 from .workflow import normalize_lora_path
 
 
@@ -26,6 +29,54 @@ def validate_comfy_url(value: str) -> str:
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise ComfyError("ComfyUI 地址格式无效")
     return value.rstrip("/")
+
+
+def _detect_local_lora_roots() -> list[Path]:
+    roots: list[Path] = []
+    env_dir = os.environ.get("COMFYUI_LORA_PATH") or os.environ.get("COMFYUI_MODELS_DIR")
+    if env_dir:
+        p = Path(env_dir)
+        if p.is_dir():
+            roots.append(p)
+    current = Path.cwd().resolve()
+    candidates = [
+        current.parent / "ComfyUI" / "models" / "loras",
+        current.parent / "models" / "loras",
+        current / "models" / "loras",
+        Path(__file__).resolve().parent.parent.parent / "ComfyUI" / "models" / "loras",
+        Path(__file__).resolve().parent.parent / "models" / "loras",
+    ]
+    for c in candidates:
+        if c.is_dir() and c not in roots:
+            roots.append(c)
+    return roots
+
+
+def _find_local_lora_file(filename: str, roots: list[Path] | None = None) -> Path | None:
+    try:
+        target = filename.replace("\\", "/").strip("/")
+        target_basename = target.rsplit("/", 1)[-1].casefold()
+        if roots is None:
+            roots = _detect_local_lora_roots()
+        for root in roots:
+            direct = root / target
+            if direct.is_file():
+                return direct
+            try:
+                normalized_direct = root / normalize_lora_path(target)
+                if normalized_direct.is_file():
+                    return normalized_direct
+            except Exception:
+                pass
+            for sub in root.glob("*.safetensors"):
+                if sub.name.casefold() == target_basename:
+                    return sub
+            for sub in root.rglob("*.safetensors"):
+                if sub.name.casefold() == target_basename:
+                    return sub
+    except Exception:
+        pass
+    return None
 
 
 class ComfyClient:
@@ -189,6 +240,7 @@ class ComfyClient:
 
         items = []
         seen: set[str] = set()
+        local_roots = _detect_local_lora_roots()
         for filename in names:
             normalized = normalize_lora_path(filename)
             identity = normalized.casefold()
@@ -209,6 +261,15 @@ class ComfyClient:
                 if manifest_metadata
                 else "comfyui"
             )
+            extracted_words = trigger_words(manager_metadata)
+            trigger_available = bool(manager_metadata)
+            if not extracted_words:
+                local_file = _find_local_lora_file(filename, local_roots)
+                if local_file:
+                    fallback_triggers = extract_safetensors_triggers(local_file)
+                    if fallback_triggers:
+                        extracted_words = fallback_triggers
+                        trigger_available = True
             items.append(
                 {
                     "filename": filename,
@@ -223,8 +284,8 @@ class ComfyClient:
                     "preview": preview,
                     "has_preview": bool(preview),
                     "preview_nsfw_level": manager_metadata.get("preview_nsfw_level", 0),
-                    "trigger_words": trigger_words(manager_metadata),
-                    "trigger_metadata_available": bool(manager_metadata),
+                    "trigger_words": extracted_words,
+                    "trigger_metadata_available": trigger_available,
                     "metadata_source": metadata_source,
                     "size": manager_metadata.get("file_size") or manifest_metadata.get("size"),
                 }
